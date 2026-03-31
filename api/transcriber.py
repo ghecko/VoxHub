@@ -6,7 +6,7 @@ import asyncio
 import numpy as np
 from typing import Dict, List, Optional, Any
 from core.audio import load_audio
-from core.registry import create_transcriber, list_supported_models
+from core.registry import create_transcriber, list_supported_models, normalize_model_spec
 from core.vad import UnifiedVAD
 from api.config import ServerConfig
 
@@ -91,7 +91,7 @@ class TranscriptionService:
         request_id: str = "",
         job_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        model_spec = model_spec or self.config.model
+        model_spec = normalize_model_spec(model_spec or self.config.model)
         vad_mode = vad_mode or self.config.vad
         diarize = diarize if diarize is not None else self.config.diarize
         
@@ -214,8 +214,6 @@ class TranscriptionService:
                     os.remove(audio_path)
                 except:
                     pass
-            
-            return final_data
 
 _service: Optional[TranscriptionService] = None
 

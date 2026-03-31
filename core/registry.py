@@ -28,6 +28,22 @@ def _get_models() -> Dict[str, Dict[str, Any]]:
 
 # ── Public API ──────────────────────────────────────────────────
 
+def normalize_model_spec(model_spec: str) -> str:
+    """Normalize model specifier (strip, fuzzy prefix)."""
+    model_spec = model_spec.strip()
+    models = _get_models()
+    
+    if model_spec in models:
+        return model_spec
+
+    if ":" not in model_spec:
+        # Fuzzy match: try common providers
+        for provider in ["whisper", "moonshine", "voxtral", "canary"]:
+            if f"{provider}:{model_spec}" in models:
+                return f"{provider}:{model_spec}"
+    
+    return model_spec
+
 def create_transcriber(
     model_spec: str,
     device: str = "auto",
@@ -40,6 +56,7 @@ def create_transcriber(
     Looks up model_spec in models.yaml first, then falls back to
     treating it as a raw HuggingFace model ID for VoxtralTranscriber.
     """
+    model_spec = normalize_model_spec(model_spec)
     models = _get_models()
 
     if model_spec in models:
