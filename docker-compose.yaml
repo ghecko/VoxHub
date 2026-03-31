@@ -57,5 +57,33 @@ services:
       - HF_TOKEN=${HF_TOKEN}
     command: --help --device cpu
 
+  # ─── VoxBench OpenAI-Compatible API ────────────────────────────
+  voxbench-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: voxbench-api:spark
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - .:/app
+      - ./outputs:/outputs
+      - ./audio:/data
+      - multi_hf_cache:/app/models
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - VOXBENCH_MODEL=${VOXBENCH_MODEL:-whisper:turbo}
+      - VOXBENCH_VAD=pyannote
+      - VOXBENCH_DIARIZE=true
+      - VOXBENCH_DEVICE=auto
+    entrypoint: ["python", "server.py"]
+
 volumes:
   multi_hf_cache:

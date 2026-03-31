@@ -157,8 +157,13 @@ class VoxtralTranscriber(BaseTranscriber):
         if tekken and hasattr(tekken, 'audio_encoder'):
             tekken.audio_encoder.audio_config.transcription_delay_ms = delay_ms
 
-    def transcribe_segment(self, audio: np.ndarray, context: Optional[str] = None) -> str:
-        inputs = self._prepare_inputs(audio, context)
+    def transcribe_segment(
+        self, 
+        audio: np.ndarray, 
+        language: Optional[str] = None,
+        context: Optional[str] = None
+    ) -> str:
+        inputs = self._prepare_inputs(audio, context, language=language)
         with torch.inference_mode():
             max_new_tokens = self.estimate_max_tokens(audio)
             generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
@@ -193,11 +198,13 @@ class VoxtralTranscriber(BaseTranscriber):
         transcriptions = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
         return [t.strip() for t in transcriptions]
 
-    def _prepare_inputs(self, audio: np.ndarray, context: Optional[str] = None):
+    def _prepare_inputs(self, audio: np.ndarray, context: Optional[str] = None, language: Optional[str] = None):
         if self._is_realtime:
             kwargs = dict(audio=audio, return_tensors="pt")
             if context:
                 kwargs["text"] = " ".join(context.split()[-30:])
+            # Voxtral doesn't explicitly support a 'language' tag in current processor, 
+            # but we could potentially wrap it in a prompt if needed.
             return self.processor(**kwargs).to(self.model.device, dtype=self._input_dtype)
         else:
             inputs = self.processor.apply_transcription_request(

@@ -122,7 +122,74 @@ When `--benchmark` is enabled, the tool logs performance metrics to `outputs/ben
 
 ---
 
+
+---
+
+## 🌐 OpenAI-Compatible API
+
+VoxBench now includes a FastAPI server that provides an OpenAI-compatible transcription endpoint. This allows you to use VoxBench as a drop-in replacement for any client that supports the OpenAI Audio API (e.g., OpenHiNotes, typingmind, etc.).
+
+### ⚙️ Features
+- **Drop-in Replace**: Works with official OpenAI SDKs (`/v1/audio/transcriptions`).
+- **High Performance**: Optimized for GPU inference with Whisper Turbo and Voxtral.
+- **Advanced VAD**: Uses Pyannote for high-accuracy speaker diarization by default.
+- **Flexible Formats**: Supports `json`, `verbose_json`, `text`, `srt`, and `vtt`.
+
+### 🚀 Running the API Server
+
+#### Docker Compose (Recommended)
+```bash
+# Start the API server on port 8000
+docker compose up voxbench-api
+```
+
+#### Manual Start
+1. Ensure dependencies are installed: `pip install -r requirements.txt`
+2. Create a `.env` file with your `HF_TOKEN` (see `.env.example`).
+3. Run the server:
+```bash
+python server.py
+```
+
+### 🛠️ Configuration (.env)
+You can configure the server using a `.env` file or environment variables:
+- `VOXBENCH_MODEL`: Default model (e.g., `whisper:turbo`).
+- `VOXBENCH_VAD`: VAD mode (`pyannote`, `silero`, or `none`).
+- `VOXBENCH_DIARIZE`: Enable/disable diarization (`true`/`false`).
+- `VOXBENCH_API_KEY`: Set an API key for optional authentication.
+- `HF_TOKEN`: Required for Pyannote VAD/Diarization.
+
+> [!TIP]
+> **Language Detection**: By default, Whisper models will auto-detect the spoken language. If you're getting translated output (e.g., English text for French audio), ensure the `language` parameter is not set to `en` in the request. You can explicitly set it to `fr` for French.
+
+---
+
+## 🏗️ Asynchronous Jobs API
+
+For long audio files, you can use the **Jobs API** to submit transcription tasks in the background and poll for progress.
+
+### 1. Submit a Job
+`POST /v1/audio/transcriptions/jobs`  
+Returns a `job_id` and links for status and results.
+
+### 2. Poll Status
+`GET /v1/audio/transcriptions/jobs/{job_id}`  
+Returns JSON with `status` (`pending`, `processing`, `completed`, `failed`) and `progress` (0-100%).
+
+### 3. Get Result
+`GET /v1/audio/transcriptions/jobs/{job_id}/result`  
+Returns the full transcription result once the job is `completed`.
+
+### 🧪 Testing Jobs
+You can test the entire workflow using the provided script:
+```bash
+python test_jobs.py audio/your_audio_file.mp3
+```
+
+---
+
 ## 📂 Project Structure
+- `api/`: FastAPI server and routers.
 - `core/registry.py`: Model factory and registry.
 - `core/vad.py`: Unified VAD wrapper for Silero/Pyannote.
 - `core/cache.py`: Persistent VAD segment caching.

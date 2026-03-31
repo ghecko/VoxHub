@@ -54,7 +54,12 @@ class WhisperTranscriber(BaseTranscriber):
         self._device = device
         self._torch_dtype = torch_dtype
 
-    def transcribe_segment(self, audio: np.ndarray, context: Optional[str] = None) -> str:
+    def transcribe_segment(
+        self, 
+        audio: np.ndarray, 
+        language: Optional[str] = None,
+        context: Optional[str] = None
+    ) -> str:
         """Transcribe a single audio segment."""
         input_features = self.processor(
             audio,
@@ -63,8 +68,11 @@ class WhisperTranscriber(BaseTranscriber):
         ).input_features.to(self.model.device, dtype=self._torch_dtype)
 
         generate_kwargs = {"max_new_tokens": 440}
-        if self.language:
-            generate_kwargs["language"] = self.language
+        
+        # Priority: requested language > model default language
+        target_lang = language or self.language
+        if target_lang:
+            generate_kwargs["language"] = target_lang
 
         with torch.inference_mode():
             predicted_ids = self.model.generate(

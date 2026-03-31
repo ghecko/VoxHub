@@ -26,7 +26,12 @@ class MoonshineTranscriber(BaseTranscriber):
             torch_dtype=torch.float16 if "cuda" in device else torch.float32
         )
 
-    def transcribe_segment(self, audio: np.ndarray, context: Optional[str] = None) -> str:
+    def transcribe_segment(
+        self, 
+        audio: np.ndarray, 
+        language: Optional[str] = None,
+        context: Optional[str] = None
+    ) -> str:
         """
         Transcribe a segment using Moonshine.
         """

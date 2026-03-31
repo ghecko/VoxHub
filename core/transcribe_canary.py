@@ -40,7 +40,12 @@ class CanaryTranscriber(BaseTranscriber):
         decode_cfg.beam.beam_size = 1
         self.model.change_decoding_strategy(decode_cfg)
 
-    def transcribe_segment(self, audio: np.ndarray, context: Optional[str] = None) -> str:
+    def transcribe_segment(
+        self, 
+        audio: np.ndarray, 
+        language: Optional[str] = None,
+        context: Optional[str] = None
+    ) -> str:
         """
         Transcribe a segment using Canary.
         Uses the NeMo API with explicit language control.
@@ -50,7 +55,8 @@ class CanaryTranscriber(BaseTranscriber):
             sf.write(tmp_path, audio, 16000)
 
         try:
-            lang = self.language or "en"
+            # Priority: requested language > model default language
+            lang = language or self.language or "en"
 
             # Canary transcribe() accepts these keyword arguments
             # for the multi-task prompt tokens:

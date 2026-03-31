@@ -20,10 +20,15 @@ class BaseTranscriber(ABC):
         pass
 
     @abstractmethod
-    def transcribe_segment(self, audio: np.ndarray, context: Optional[str] = None) -> str:
+    def transcribe_segment(
+        self, 
+        audio: np.ndarray, 
+        language: Optional[str] = None,
+        context: Optional[str] = None
+    ) -> str:
         """
         Transcribe a single audio segment.
-        Optionally accepts context (previous transcript) for continuity.
+        Optionally accepts language and context (previous transcript) for continuity.
         """
         pass
 

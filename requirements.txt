@@ -16,3 +16,9 @@ torchao
 bitsandbytes
 compressed-tensors
 # nemo_toolkit[asr] -- handled in Dockerfile or specialized env
+
+# ── API dependencies ───────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-multipart
+pydantic-settings
