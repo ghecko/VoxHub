@@ -16,6 +16,7 @@ from core.registry import create_transcriber, list_supported_models
 from core.vad import UnifiedVAD
 from core.cache import VADCache
 from core.benchmark import BenchmarkTracker
+from core.segments import sanitize_segments
 
 console = Console()
 
@@ -156,6 +157,20 @@ def main():
         help="Silero confidence above which segments are kept even if Pyannote disagrees (default: 0.8)"
     )
     
+    # Segment post-processing
+    parser.add_argument(
+        "--no-sanitize", action="store_true",
+        help="Disable segment sanitization (overlap resolution, micro-turn absorption)"
+    )
+    parser.add_argument(
+        "--refine-boundaries", action="store_true",
+        help="Use wav2vec2 to snap segment boundaries to exact speech onset/offset"
+    )
+    parser.add_argument(
+        "--min-turn", type=float, default=1.5,
+        help="Speaker turns shorter than this (seconds) are absorbed into surrounding turns (default: 1.5)"
+    )
+
     # Performance & Device
     parser.add_argument("--device", choices=["auto", "cuda", "rocm", "cpu"], default="auto", help="Hardware device")
     parser.add_argument("--precision", default="auto", help="Model precision (Voxtral only: auto, fp16, fp8, q4, q8)")
@@ -221,6 +236,19 @@ def main():
             cache.save(audio.tobytes()[:1000000], vad_params, segments)
 
     console.print(f"  {len(segments)} segments found")
+
+    # --- Stage 3b: Segment post-processing ---
+    if not args.no_sanitize and len(segments) > 1:
+        console.print(f"[bold cyan]Sanitizing segments (min_turn={args.min_turn}s)...[/bold cyan]")
+        segments = sanitize_segments(segments, min_turn_duration=args.min_turn)
+        console.print(f"  {len(segments)} segments after sanitization")
+
+    if args.refine_boundaries:
+        console.print("[bold cyan]Refining boundaries with wav2vec2...[/bold cyan]")
+        from core.segments import BoundaryRefiner
+        refiner = BoundaryRefiner(device=args.device)
+        segments = refiner.refine_boundaries(audio, segments)
+        console.print("  Boundaries refined")
 
     # --- Stage 4/5: Process each model ---
     for model_spec in models_to_run:

@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Any
 from core.audio import load_audio
 from core.registry import create_transcriber, list_supported_models, normalize_model_spec
 from core.vad import UnifiedVAD
+from core.segments import sanitize_segments, BoundaryRefiner
 from api.config import ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,18 @@ class TranscriptionService:
         self._lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         self._vad_engines: Dict[str, UnifiedVAD] = {}
+        self._boundary_refiner: Optional[BoundaryRefiner] = None
         self._jobs: Dict[str, Dict[str, Any]] = {}
+
+    def _get_boundary_refiner(self) -> Optional[BoundaryRefiner]:
+        """Lazy-load the wav2vec2 boundary refiner."""
+        if self._boundary_refiner is None:
+            try:
+                self._boundary_refiner = BoundaryRefiner(device=self.config.device)
+            except Exception as e:
+                logger.warning(f"Could not load BoundaryRefiner: {e}")
+                return None
+        return self._boundary_refiner
 
     def get_vad(self, mode: str) -> UnifiedVAD:
         if mode not in self._vad_engines:
@@ -118,6 +130,23 @@ class TranscriptionService:
                 audio,
                 diarize=diarize
             )
+
+            # 2b. Sanitize segments (overlap resolution, micro-turn absorption)
+            if len(segments) > 1:
+                segments = await asyncio.to_thread(
+                    sanitize_segments, segments,
+                    min_turn_duration=self.config.min_turn_duration,
+                )
+                logger.info(f"[{request_id}] {len(segments)} segments after sanitization")
+
+            # 2c. Optional wav2vec2 boundary refinement
+            if self.config.refine_boundaries:
+                refiner = self._get_boundary_refiner()
+                if refiner:
+                    segments = await asyncio.to_thread(
+                        refiner.refine_boundaries, audio, segments
+                    )
+                    logger.info(f"[{request_id}] Boundaries refined with wav2vec2")
 
             # 3. Get Model
             if job_id:

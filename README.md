@@ -79,6 +79,36 @@ python main.py audio/meeting.mp3 --vad hybrid --diarize
 python main.py audio/meeting.mp3 --vad hybrid --silero-threshold 0.3 --override-threshold 0.85
 ```
 
+### Segment Post-Processing
+
+After diarization, segments go through two optional post-processing layers before transcription. This fixes the common issue where Pyannote splits a speaker's turn at a short interjection (e.g. "ok", "yeah", "better"), producing mis-aligned timestamps.
+
+**Layer 1 — Segment Sanitizer** (on by default)
+
+Rule-based, no ML overhead. Handles two issues:
+
+1. **Micro-turn absorption**: When speaker A is interrupted by a very short speaker B turn (< `--min-turn` seconds) and speaker A resumes immediately after, the two A segments are merged into one continuous turn. The interjection is dropped — its audio falls within the merged range and is captured by the ASR model.
+2. **Overlap resolution**: When two segments overlap in time, the shorter one is trimmed so the timeline is strictly sequential.
+
+```bash
+# Default: absorb turns shorter than 1.5s
+python main.py audio/meeting.mp3 --vad pyannote --diarize
+
+# More aggressive: absorb turns shorter than 2.5s
+python main.py audio/meeting.mp3 --vad pyannote --diarize --min-turn 2.5
+
+# Disable sanitization entirely
+python main.py audio/meeting.mp3 --vad pyannote --diarize --no-sanitize
+```
+
+**Layer 2 — Wav2Vec2 Boundary Refinement** (opt-in via `--refine-boundaries`)
+
+Uses wav2vec2's CTC frame-level probabilities to snap each segment boundary to the exact speech onset/offset. For each boundary, a ±1s audio window is analyzed to find where speech actually starts and ends at the frame level. Useful when Pyannote's boundary is off by a few hundred milliseconds — enough to clip the first or last word.
+
+```bash
+python main.py audio/meeting.mp3 --vad hybrid --diarize --refine-boundaries
+```
+
 ---
 
 ## API Reference
@@ -119,6 +149,8 @@ python test_jobs.py audio/your_audio_file.mp3
 | `VOXHUB_DIARIZE` | `true` | Enable speaker diarization |
 | `VOXHUB_SILERO_THRESHOLD` | `0.35` | Silero gate sensitivity (hybrid mode) |
 | `VOXHUB_OVERRIDE_THRESHOLD` | `0.8` | Confidence override cutoff (hybrid mode) |
+| `VOXHUB_MIN_TURN_DURATION` | `1.5` | Speaker turns shorter than this (seconds) are absorbed |
+| `VOXHUB_REFINE_BOUNDARIES` | `false` | Enable wav2vec2 boundary snapping |
 | `VOXHUB_API_KEY` | — | Optional API authentication |
 | `VOXHUB_DEVICE` | `auto` | Hardware: `auto`, `cuda`, `rocm`, `cpu` |
 | `HF_TOKEN` | — | Required for Pyannote/hybrid VAD and gated models |
@@ -134,6 +166,8 @@ python main.py audio.mp3 \
   --diarize \
   --silero-threshold 0.35 \
   --override-threshold 0.8 \
+  --min-turn 1.5 \
+  --refine-boundaries \
   --precision fp16 \
   --benchmark
 ```
@@ -175,8 +209,15 @@ graph TD
         H -.->|Cache| I[(.cache/vad)]
     end
 
+    subgraph "Post-Processing"
+        H --> H1[Segment Sanitizer]
+        H1 -->|opt-in| H2[Wav2Vec2 Boundary Refiner]
+        H2 --> H3[Clean Segments]
+        H1 -->|default| H3
+    end
+
     subgraph "ASR Registry"
-        H --> J{Model Factory}
+        H3 --> J{Model Factory}
         J -->|voxtral| K[VoxtralTranscriber]
         J -->|whisper| L[WhisperTranscriber]
         J -->|moonshine| M[MoonshineTranscriber]
@@ -201,6 +242,7 @@ api/                  FastAPI server, routers, formatters
   transcriber.py      Async transcription service with job management
 core/
   vad.py              Unified VAD orchestrator (Silero, Pyannote, Hybrid)
+  segments.py         Segment post-processor (sanitizer + wav2vec2 boundary refiner)
   diarize.py          Pyannote speaker diarization
   registry.py         Model factory and YAML-based registry
   transcribe*.py      Engine-specific ASR backends

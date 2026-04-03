@@ -55,6 +55,10 @@ class ServerConfig(BaseSettings):
     silero_threshold: float = Field(default=0.35, description="Silero gate sensitivity for hybrid mode")
     override_threshold: float = Field(default=0.8, description="Silero confidence to override Pyannote rejection")
 
+    # Segment post-processing
+    min_turn_duration: float = Field(default=1.5, description="Speaker turns shorter than this are absorbed (seconds)")
+    refine_boundaries: bool = Field(default=False, description="Use wav2vec2 to snap boundaries to exact speech onset/offset")
+
     # Transcription settings (from main.py)
     precision: str = "auto"
     flash_attn: bool = False
