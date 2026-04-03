@@ -62,11 +62,14 @@ def sanitize_segments(
 
     original_count = len(working)
 
-    # --- Pass 1: Absorb micro-turns (iterate until stable) ---
-    prev_count = -1
-    while len(working) != prev_count:
-        prev_count = len(working)
-        working = _absorb_micro_turns(working, min_turn_duration)
+    # --- Pass 1: Absorb micro-turns (single pass only) ---
+    # A single pass handles the common case: one backchannel interjection
+    # between two segments of the same speaker. We deliberately avoid
+    # iterating to convergence because cascading absorptions can eat
+    # legitimate speech — e.g. when Pyannote fragments a real speaker
+    # turn into several short segments, each pass would absorb the next
+    # one until the entire turn is gone.
+    working = _absorb_micro_turns(working, min_turn_duration)
 
     # --- Pass 2: Resolve overlaps ---
     working = _resolve_overlaps(working, max_overlap)
