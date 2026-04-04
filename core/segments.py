@@ -103,13 +103,24 @@ def _absorb_micro_turns(
     After (with min_turn_duration=2.5):
         SPEAKER_00  5:50 - 6:20   (merged across the micro-turn)
 
-    The interjection's audio falls within the merged segment and will
-    be transcribed as part of the primary speaker's turn. This is
-    preferable to fragmenting the primary speaker's flow for a
-    backchannel that is often inaudible or trivial.
+    Only truly isolated speakers are absorbed — any speaker that appears
+    2+ times in the full segment list is considered a real conversation
+    participant and is never absorbed, regardless of how short their
+    individual turns are.
     """
     if len(segments) < 3:
         return segments
+
+    # Pre-compute speaker frequency across ALL segments. Any speaker with
+    # 2+ segments is a real participant — not a one-off backchannel.
+    from collections import Counter
+    speaker_counts = Counter(s.get("speaker") for s in segments)
+    real_speakers = {spk for spk, count in speaker_counts.items() if count >= 2}
+
+    logger.debug(
+        f"[Sanitizer] Speaker counts: {dict(speaker_counts)} — "
+        f"protected (>=2 segments): {real_speakers}"
+    )
 
     result = []
     i = 0
@@ -129,9 +140,24 @@ def _absorb_micro_turns(
             )
 
             if same_speaker_resumes and middle_duration < min_turn_duration:
-                # Merge current + after into one segment for the primary speaker.
-                # The micro-turn is dropped — its audio falls within the merged
-                # range and will be captured by the ASR model.
+                middle_speaker = middle.get("speaker")
+
+                if middle_speaker in real_speakers:
+                    # This speaker appears elsewhere in the conversation —
+                    # they're a real participant, not a backchannel. Keep.
+                    logger.debug(
+                        f"[Sanitizer] Kept {middle_speaker} "
+                        f"[{middle['start']:.1f}-{middle['end']:.1f}s] "
+                        f"({middle_duration:.1f}s) — real speaker "
+                        f"({speaker_counts[middle_speaker]} total segments)"
+                    )
+                    result.append(current)
+                    i += 1
+                    continue
+
+                # Truly isolated backchannel (only 1 segment total) — absorb.
+                # Its audio falls within the merged range and will be
+                # captured by the ASR model.
                 merged = {
                     "start": current["start"],
                     "end": after["end"],
@@ -140,9 +166,10 @@ def _absorb_micro_turns(
                 result.append(merged)
 
                 logger.debug(
-                    f"[Sanitizer] Absorbed micro-turn: {middle.get('speaker')} "
+                    f"[Sanitizer] Absorbed micro-turn: {middle_speaker} "
                     f"[{middle['start']:.1f}-{middle['end']:.1f}s] "
-                    f"({middle_duration:.1f}s) — merged {current.get('speaker')} "
+                    f"({middle_duration:.1f}s) — isolated speaker, merged "
+                    f"{current.get('speaker')} "
                     f"[{current['start']:.1f}-{after['end']:.1f}s]"
                 )
 
