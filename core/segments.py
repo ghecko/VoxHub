@@ -142,6 +142,22 @@ def _absorb_micro_turns(
             if same_speaker_resumes and middle_duration < min_turn_duration:
                 middle_speaker = middle.get("speaker")
 
+                # Safety: never merge if the resulting segment would span a
+                # much larger time range than the two original segments.
+                # This prevents a short backchannel from causing a huge
+                # merged block that eclipses other segments in between.
+                gap = after["start"] - current["end"]
+                if gap > min_turn_duration:
+                    logger.debug(
+                        f"[Sanitizer] Skipped absorption — gap too large: "
+                        f"{gap:.1f}s between {current.get('speaker')} "
+                        f"[{current['start']:.1f}-{current['end']:.1f}s] and "
+                        f"[{after['start']:.1f}-{after['end']:.1f}s]"
+                    )
+                    result.append(current)
+                    i += 1
+                    continue
+
                 if middle_speaker in real_speakers:
                     # This speaker appears elsewhere in the conversation —
                     # they're a real participant, not a backchannel. Keep.
@@ -224,7 +240,15 @@ def _resolve_overlaps(
                     f"[Sanitizer] Trimmed {seg.get('speaker')} start: "
                     f"{seg['start']:.1f} -> {new_start:.1f}"
                 )
-            # else: segment is completely eclipsed, drop it
+            else:
+                # Segment is completely eclipsed by the previous one.
+                # Log it — this can signal over-aggressive merging upstream.
+                logger.warning(
+                    f"[Sanitizer] Dropped eclipsed segment: "
+                    f"{seg.get('speaker')} [{seg['start']:.1f}-{seg['end']:.1f}s] "
+                    f"(eclipsed by {prev.get('speaker')} "
+                    f"[{prev['start']:.1f}-{prev['end']:.1f}s])"
+                )
         else:
             # The previous segment is shorter — trim its end
             prev["end"] = round(seg["start"], 3)
