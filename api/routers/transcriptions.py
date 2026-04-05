@@ -151,6 +151,31 @@ async def create_transcription_job(
     }
 
 @router.get(
+    "/v1/audio/transcriptions/jobs",
+    tags=["Jobs"],
+    description="List all transcription jobs with their current state. Optionally filter by status."
+)
+async def list_jobs(
+    config: Annotated[ServerConfig, Depends(get_config)],
+    auth: Annotated[None, ApiKeyDependency] = None,
+    status_filter: Optional[str] = None,
+):
+    """
+    Returns an overview of every job in the queue, sorted newest-first.
+    Pass ?status=pending|processing|completed|failed|cancelled to filter.
+    """
+    service = get_transcription_service(config)
+    jobs = service.list_jobs(status_filter=status_filter)
+    counts = {}
+    for j in service.list_jobs():
+        counts[j["status"]] = counts.get(j["status"], 0) + 1
+    return {
+        "jobs": jobs,
+        "total": sum(counts.values()),
+        "counts": counts,
+    }
+
+@router.get(
     "/v1/audio/transcriptions/jobs/{job_id}",
     tags=["Jobs"],
     description="Get the status and progress of a transcription job."
@@ -164,10 +189,58 @@ async def get_job_status(
     job = service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     # Return status without the bulky result
     status_data = {k: v for k, v in job.items() if k != "result"}
     return status_data
+
+@router.post(
+    "/v1/audio/transcriptions/jobs/{job_id}/cancel",
+    tags=["Jobs"],
+    description="Cancel a pending or running transcription job. Results are discarded."
+)
+async def cancel_job(
+    job_id: str,
+    config: Annotated[ServerConfig, Depends(get_config)],
+    auth: Annotated[None, ApiKeyDependency] = None,
+):
+    service = get_transcription_service(config)
+    job = service.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    accepted = service.cancel_job(job_id)
+    if not accepted:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job cannot be cancelled. Current status: {job['status']}"
+        )
+
+    return {"job_id": job_id, "status": "cancelled"}
+
+@router.delete(
+    "/v1/audio/transcriptions/jobs/{job_id}",
+    tags=["Jobs"],
+    description="Delete a finished job (completed, failed, or cancelled). Running jobs must be cancelled first."
+)
+async def delete_job(
+    job_id: str,
+    config: Annotated[ServerConfig, Depends(get_config)],
+    auth: Annotated[None, ApiKeyDependency] = None,
+):
+    service = get_transcription_service(config)
+    job = service.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    deleted = service.delete_job(job_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete a job that is still running (status: {job['status']}). Cancel it first."
+        )
+
+    return {"job_id": job_id, "deleted": True}
 
 @router.get(
     "/v1/audio/transcriptions/jobs/{job_id}/result",

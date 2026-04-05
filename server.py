@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from api.config import get_config
 from api.middleware import RequestIDMiddleware
+from api.transcriber import get_transcription_service
 from api.routers import health, models, transcriptions
 
 # Setup Logging
@@ -28,7 +29,13 @@ async def lifespan(app: FastAPI):
         logger.info("HF_TOKEN detected (for pyannote/gated models)")
     else:
         logger.warning("HF_TOKEN not detected. pyannote VAD/Diarization might fail.")
-    
+
+    # Start the job TTL cleanup loop
+    service = get_transcription_service(config)
+    service.start_cleanup_loop()
+    ttl_display = f"{config.result_ttl}s" if config.result_ttl > 0 else "disabled"
+    logger.info(f"Result TTL   : {ttl_display}")
+
     yield
     logger.info("Shutting down VoxHub API Server")
 

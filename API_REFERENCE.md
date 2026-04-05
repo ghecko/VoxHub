@@ -210,6 +210,72 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions/jobs \
 
 ---
 
+### `GET /v1/audio/transcriptions/jobs`
+
+List all transcription jobs currently held in memory, sorted newest-first. Useful for monitoring the queue, checking how many jobs are pending or in progress, and discovering job IDs.
+
+#### Query Parameters
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `status` | string | — | Optional filter. One of: `pending`, `processing`, `completed`, `failed`, `cancelled`. When omitted, all jobs are returned. |
+
+#### Example
+
+```bash
+# All jobs
+curl http://localhost:8000/v1/audio/transcriptions/jobs \
+  -H "Authorization: Bearer my-secret-key"
+
+# Only jobs currently running
+curl "http://localhost:8000/v1/audio/transcriptions/jobs?status=processing" \
+  -H "Authorization: Bearer my-secret-key"
+```
+
+#### Response
+
+```json
+{
+  "jobs": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "status": "processing",
+      "stage": "transcribing",
+      "progress": 42,
+      "created_at": 1712300000.0,
+      "completed_at": null,
+      "error": null
+    },
+    {
+      "id": "f9e8d7c6-b5a4-3210-fedc-ba0987654321",
+      "status": "pending",
+      "stage": null,
+      "progress": 0,
+      "created_at": 1712299950.0,
+      "completed_at": null,
+      "error": null
+    }
+  ],
+  "total": 5,
+  "counts": {
+    "pending": 1,
+    "processing": 1,
+    "completed": 2,
+    "cancelled": 1
+  }
+}
+```
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `jobs` | array | Job objects (without the `result` payload) matching the filter, sorted by `created_at` descending |
+| `total` | int | Total number of jobs across all statuses |
+| `counts` | object | Breakdown of jobs by status (`pending`, `processing`, `completed`, `failed`, `cancelled`) |
+
+> **Note:** The `result` field is intentionally omitted from the list response to keep the payload small. Use `GET /v1/audio/transcriptions/jobs/{job_id}/result` to retrieve a completed job's transcription.
+
+---
+
 ### `GET /v1/audio/transcriptions/jobs/{job_id}`
 
 Poll the status of an async transcription job.
@@ -228,7 +294,7 @@ Poll the status of an async transcription job.
 | Field | Type | Description |
 |:------|:-----|:------------|
 | `job_id` | string | The job identifier |
-| `status` | string | One of: `pending`, `processing`, `completed`, `failed` |
+| `status` | string | One of: `pending`, `processing`, `completed`, `failed`, `cancelled` |
 | `stage` | string or null | Current pipeline stage: `loading`, `vad`, `transcribing`, or `null` when done |
 | `progress` | int | Percentage complete (0–100) |
 
@@ -247,6 +313,54 @@ Retrieve the result of a completed job. Returns `400` if the job is not yet comp
 #### Response
 
 Same structure as the synchronous transcription endpoint, depending on the chosen `response_format`.
+
+---
+
+### `POST /v1/audio/transcriptions/jobs/{job_id}/cancel`
+
+Cancel a pending or running transcription job. The cancellation is cooperative: a running job will stop at the next segment boundary. All partial results are discarded.
+
+#### Response
+
+```json
+{
+  "job_id": "a1b2c3d4-...",
+  "status": "cancelled"
+}
+```
+
+Returns `404` if the job does not exist. Returns `409` if the job has already reached a terminal state (`completed`, `failed`, or `cancelled`).
+
+#### Example
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions/jobs/a1b2c3d4-e5f6-7890-abcd-ef1234567890/cancel \
+  -H "Authorization: Bearer my-secret-key"
+```
+
+---
+
+### `DELETE /v1/audio/transcriptions/jobs/{job_id}`
+
+Delete a finished job from server memory, freeing the resources held by its result payload. Only jobs in a terminal state (`completed`, `failed`, `cancelled`) can be deleted. Running or pending jobs must be cancelled first.
+
+#### Response
+
+```json
+{
+  "job_id": "a1b2c3d4-...",
+  "deleted": true
+}
+```
+
+Returns `404` if the job does not exist. Returns `409` if the job is still running or pending (cancel it first).
+
+#### Example
+
+```bash
+curl -X DELETE http://localhost:8000/v1/audio/transcriptions/jobs/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer my-secret-key"
+```
 
 ---
 
@@ -376,6 +490,20 @@ The `vad_mode` parameter controls how audio is segmented before transcription:
 | `vtt` | `text/vtt` | WebVTT subtitle format with speaker labels |
 | `vtt_json` | `application/json` | Combined: the VTT string, the full text, and the raw segment array |
 
+### Result Retention
+
+Job results are stored in server memory and are **automatically purged** after a configurable time-to-live (TTL) measured from the moment the job reaches a terminal state (`completed`, `failed`, or `cancelled`).
+
+| Environment Variable | Default | Description |
+|:---------------------|:--------|:------------|
+| `VOXHUB_RESULT_TTL` | `3600` (1 hour) | Seconds to keep finished job results. Set to `0` to disable automatic purging (results kept until server restart or manual deletion). |
+
+The cleanup process runs every 60 seconds and removes all expired jobs silently. Once a job is purged, any subsequent `GET` on its status or result endpoint returns `404`.
+
+To free memory before the TTL expires, use `DELETE /v1/audio/transcriptions/jobs/{job_id}` on any finished job.
+
+> **Note:** All job state is in-memory. A server restart clears every job regardless of TTL.
+
 ---
 
 ## Error Responses
@@ -390,8 +518,9 @@ All errors return JSON:
 
 | Status | Meaning |
 |:-------|:--------|
+| `400` | Job not yet completed (when fetching result) |
 | `401` | Missing API key (when `VOXHUB_API_KEY` is configured) |
 | `403` | Invalid API key |
-| `404` | Job not found, or model not loaded (for unload) |
-| `400` | Job not yet completed (when fetching result) |
+| `404` | Job not found (or already purged), or model not loaded (for unload) |
+| `409` | Conflict: job cannot be cancelled (already terminal) or deleted (still running) |
 | `500` | Transcription or internal server error |

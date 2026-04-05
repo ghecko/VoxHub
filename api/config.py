@@ -51,6 +51,9 @@ class ServerConfig(BaseSettings):
     # Performance
     max_concurrent: int = 1
 
+    # Job result retention (seconds). Completed/failed/cancelled jobs are purged after this delay.
+    result_ttl: int = Field(default=3600, description="Seconds to keep finished job results (0 = keep forever)")
+
     # Hybrid VAD tuning (only used when vad=hybrid)
     silero_threshold: float = Field(default=0.35, description="Silero gate sensitivity for hybrid mode")
     override_threshold: float = Field(default=0.8, description="Silero confidence to override Pyannote rejection")

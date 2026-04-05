@@ -13,6 +13,11 @@ from api.config import ServerConfig
 
 logger = logging.getLogger(__name__)
 
+
+class CancelledError(Exception):
+    """Raised when a running job is cancelled."""
+
+
 class TranscriptionService:
     def __init__(self, config: ServerConfig):
         self.config = config
@@ -22,6 +27,8 @@ class TranscriptionService:
         self._vad_engines: Dict[str, UnifiedVAD] = {}
         self._boundary_refiner: Optional[BoundaryRefiner] = None
         self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._cancel_flags: Dict[str, asyncio.Event] = {}
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     def _get_boundary_refiner(self) -> Optional[BoundaryRefiner]:
         """Lazy-load the wav2vec2 boundary refiner."""
@@ -79,10 +86,57 @@ class TranscriptionService:
     def list_loaded_models(self) -> List[str]:
         return list(self._models.keys())
 
+    # ------------------------------------------------------------------
+    # TTL cleanup
+    # ------------------------------------------------------------------
+
+    def start_cleanup_loop(self):
+        """Start the background task that purges expired jobs. Call once at startup."""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.ensure_future(self._ttl_cleanup_loop())
+
+    async def _ttl_cleanup_loop(self):
+        """Periodically remove finished jobs older than result_ttl."""
+        while True:
+            await asyncio.sleep(60)  # check every minute
+            self._purge_expired_jobs()
+
+    def _purge_expired_jobs(self):
+        ttl = self.config.result_ttl
+        if ttl <= 0:
+            return  # 0 means keep forever
+        now = time.time()
+        expired = [
+            jid for jid, job in self._jobs.items()
+            if job["status"] in ("completed", "failed", "cancelled")
+            and job.get("completed_at") is not None
+            and (now - job["completed_at"]) > ttl
+        ]
+        for jid in expired:
+            logger.info(f"Purging expired job {jid} (TTL {ttl}s exceeded)")
+            self._jobs.pop(jid, None)
+            self._cancel_flags.pop(jid, None)
+
+    # ------------------------------------------------------------------
+    # Job CRUD
+    # ------------------------------------------------------------------
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         return self._jobs.get(job_id)
 
+    def list_jobs(self, status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return all jobs (without result payload), optionally filtered by status.
+        Jobs are sorted by created_at descending (newest first)."""
+        jobs = []
+        for job in self._jobs.values():
+            if status_filter and job["status"] != status_filter:
+                continue
+            jobs.append({k: v for k, v in job.items() if k != "result"})
+        jobs.sort(key=lambda j: j["created_at"], reverse=True)
+        return jobs
+
     def create_job(self, job_id: str):
+        self._cancel_flags[job_id] = asyncio.Event()
         self._jobs[job_id] = {
             "id": job_id,
             "status": "pending",
@@ -93,6 +147,38 @@ class TranscriptionService:
             "result": None,
             "error": None
         }
+
+    def cancel_job(self, job_id: str) -> bool:
+        """Request cancellation for a running or pending job.
+        Returns True if the cancellation was accepted."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        if job["status"] in ("completed", "failed", "cancelled"):
+            return False  # already terminal
+        # Signal the flag so the transcription loop can check it
+        flag = self._cancel_flags.get(job_id)
+        if flag:
+            flag.set()
+        # If still pending (not yet picked up), mark immediately
+        if job["status"] == "pending":
+            self._update_job(job_id, status="cancelled", completed_at=time.time(), result=None)
+        return True
+
+    def delete_job(self, job_id: str) -> bool:
+        """Remove a finished job from memory. Running jobs must be cancelled first."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        if job["status"] in ("pending", "processing"):
+            return False  # must cancel first
+        self._jobs.pop(job_id, None)
+        self._cancel_flags.pop(job_id, None)
+        return True
+
+    def _is_cancelled(self, job_id: str) -> bool:
+        flag = self._cancel_flags.get(job_id)
+        return flag is not None and flag.is_set()
 
     def _update_job(self, job_id: str, **kwargs):
         if job_id in self._jobs:
@@ -116,12 +202,16 @@ class TranscriptionService:
         async with self._semaphore:
             # 1. Load Audio
             if job_id:
+                if self._is_cancelled(job_id):
+                    raise CancelledError(f"Job {job_id} cancelled before loading")
                 self._update_job(job_id, stage="loading")
             logger.info(f"[{request_id}] Loading audio: {audio_path}")
             audio = await asyncio.to_thread(load_audio, audio_path)
 
             # 2. Run VAD/Diarization
             if job_id:
+                if self._is_cancelled(job_id):
+                    raise CancelledError(f"Job {job_id} cancelled before VAD")
                 self._update_job(job_id, stage="vad")
             logger.info(f"[{request_id}] Running VAD ({vad_mode}, diarize={diarize})")
             vad_engine = self.get_vad(vad_mode)
@@ -150,6 +240,8 @@ class TranscriptionService:
 
             # 3. Get Model
             if job_id:
+                if self._is_cancelled(job_id):
+                    raise CancelledError(f"Job {job_id} cancelled before transcription")
                 self._update_job(job_id, stage="transcribing")
             transcriber = await self.get_model(model_spec)
 
@@ -160,6 +252,10 @@ class TranscriptionService:
             sampling_rate = 16000
             
             for i, seg in enumerate(segments):
+                # Check cancellation between segments
+                if job_id and self._is_cancelled(job_id):
+                    raise CancelledError(f"Job {job_id} cancelled during transcription (segment {i}/{len(segments)})")
+
                 if i % 5 == 0 or i == len(segments) - 1:
                     logger.info(f"[{request_id}] Progress: {i+1}/{len(segments)} segments processed")
                     if job_id:
@@ -234,6 +330,10 @@ class TranscriptionService:
         request_id: str = ""
     ):
         try:
+            # If cancelled while still pending, skip entirely
+            if self._is_cancelled(job_id):
+                self._update_job(job_id, status="cancelled", completed_at=time.time(), result=None)
+                return
             self._update_job(job_id, status="processing")
             await self.transcribe(
                 audio_path=audio_path,
@@ -245,6 +345,9 @@ class TranscriptionService:
                 request_id=request_id,
                 job_id=job_id
             )
+        except CancelledError:
+            logger.info(f"[{request_id}] Job {job_id} cancelled")
+            self._update_job(job_id, status="cancelled", completed_at=time.time(), result=None)
         except Exception as e:
             logger.exception(f"[{request_id}] Job {job_id} failed: {e}")
             self._update_job(job_id, status="failed", error=str(e), completed_at=time.time())
