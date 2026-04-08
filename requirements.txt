@@ -1,4 +1,8 @@
 # ── Unified dependencies for VoxHub ──────────────────
+# Pin torch+torchaudio together to avoid ABI mismatches when resolved
+# independently by different packages (pyannote, silero-vad, etc.)
+torch>=2.4.0,<2.8
+torchaudio>=2.4.0,<2.8
 pyannote.audio
 ffmpeg-python
 pydantic
