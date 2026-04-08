@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from api.config import get_config
 from api.middleware import RequestIDMiddleware
 from api.transcriber import get_transcription_service
-from api.routers import health, models, transcriptions
+from api.routers import health, models, transcriptions, embeddings
 
 # Setup Logging
 logging.basicConfig(
@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(models.router)
     app.include_router(transcriptions.router)
+    app.include_router(embeddings.router)
     
     return app
 

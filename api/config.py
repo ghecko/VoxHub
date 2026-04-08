@@ -67,5 +67,11 @@ class ServerConfig(BaseSettings):
     flash_attn: bool = False
     compile_model: bool = False
 
+    # Embedding settings
+    allow_insecure_embeddings: bool = Field(
+        default=False,
+        description="Allow embedding extraction/return over plain HTTP (dev only, MUST be false in production)"
+    )
+
 def get_config() -> ServerConfig:
     return ServerConfig()

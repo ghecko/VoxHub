@@ -135,7 +135,7 @@ class TranscriptionService:
         jobs.sort(key=lambda j: j["created_at"], reverse=True)
         return jobs
 
-    def create_job(self, job_id: str):
+    def create_job(self, job_id: str, return_speaker_embeddings: bool = False):
         self._cancel_flags[job_id] = asyncio.Event()
         self._jobs[job_id] = {
             "id": job_id,
@@ -145,7 +145,8 @@ class TranscriptionService:
             "created_at": time.time(),
             "completed_at": None,
             "result": None,
-            "error": None
+            "error": None,
+            "return_speaker_embeddings": return_speaker_embeddings,
         }
 
     def cancel_job(self, job_id: str) -> bool:
@@ -193,8 +194,9 @@ class TranscriptionService:
         vad_mode: Optional[str] = None,
         diarize: Optional[bool] = None,
         request_id: str = "",
-        job_id: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        job_id: Optional[str] = None,
+        return_speaker_embeddings: bool = False,
+    ):
         model_spec = normalize_model_spec(model_spec or self.config.model)
         vad_mode = vad_mode or self.config.vad
         diarize = diarize if diarize is not None else self.config.diarize
@@ -313,10 +315,32 @@ class TranscriptionService:
                         "text": str(text)
                     })
             
+            # 5. Extract per-speaker embeddings if requested
+            result = final_data
+            if return_speaker_embeddings and diarize and final_data:
+                try:
+                    from core.embeddings import extract_per_speaker_embeddings
+                    logger.info(f"[{request_id}] Extracting per-speaker embeddings")
+                    speaker_embeddings = await asyncio.to_thread(
+                        extract_per_speaker_embeddings,
+                        audio,
+                        final_data,
+                        16000,
+                        self.config.hf_token,
+                    )
+                    result = {
+                        "segments": final_data,
+                        "speaker_embeddings": speaker_embeddings,
+                    }
+                except Exception as e:
+                    logger.warning(f"[{request_id}] Speaker embedding extraction failed: {e}")
+                    # Don't fail the transcription — just omit embeddings
+                    result = final_data
+
             if job_id:
-                self._update_job(job_id, status="completed", stage=None, progress=100, result=final_data, completed_at=time.time())
-                
-            return final_data
+                self._update_job(job_id, status="completed", stage=None, progress=100, result=result, completed_at=time.time())
+
+            return result
 
     async def transcribe_job_runner(
         self,
@@ -327,7 +351,8 @@ class TranscriptionService:
         prompt: Optional[str] = None,
         vad_mode: Optional[str] = None,
         diarize: Optional[bool] = None,
-        request_id: str = ""
+        request_id: str = "",
+        return_speaker_embeddings: bool = False,
     ):
         try:
             # If cancelled while still pending, skip entirely
@@ -343,7 +368,8 @@ class TranscriptionService:
                 vad_mode=vad_mode,
                 diarize=diarize,
                 request_id=request_id,
-                job_id=job_id
+                job_id=job_id,
+                return_speaker_embeddings=return_speaker_embeddings,
             )
         except CancelledError:
             logger.info(f"[{request_id}] Job {job_id} cancelled")
