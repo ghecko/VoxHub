@@ -14,15 +14,33 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # ── Setup Virtual Environment (Fix PEP 668) ──────────────────────
+# Use --system-site-packages so we inherit the base image's torch,
+# torchaudio, and CUDA-matched libraries instead of pulling fresh
+# (possibly ABI-incompatible) copies.
 ENV VIRTUAL_ENV=/opt/venv
-RUN uv venv $VIRTUAL_ENV
+RUN uv venv --system-site-packages $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install all Python dependencies using uv
+# Install all Python dependencies using uv.
+# The base image already provides torch, torchaudio, and torchvision that are
+# ABI-matched to its CUDA toolkit. We must not let uv overwrite them with
+# PyPI builds (which cause "undefined symbol" crashes). Using
+# --system-site-packages above makes them visible; here we just need to
+# make sure uv doesn't pull newer/incompatible versions as transitive deps.
 COPY requirements.txt ./
-RUN uv pip install --no-cache-dir -r requirements.txt \
-    && uv pip install 'nemo_toolkit[asr]' \
-    && uv pip install --force-reinstall 'transformers>=4.49.0'
+RUN TORCH_VER=$(python -c "import torch; print(torch.__version__.split('+')[0])") && \
+    TORCHAUDIO_VER=$(python -c "import torchaudio; print(torchaudio.__version__.split('+')[0])" 2>/dev/null || echo "") && \
+    echo "Base image torch=${TORCH_VER}  torchaudio=${TORCHAUDIO_VER}" && \
+    CONSTRAINT_ARGS="" && \
+    if [ -n "$TORCHAUDIO_VER" ]; then \
+        printf "torch==${TORCH_VER}\ntorchaudio==${TORCHAUDIO_VER}\n" > /tmp/constraints.txt; \
+    else \
+        printf "torch==${TORCH_VER}\n" > /tmp/constraints.txt; \
+    fi && \
+    uv pip install --no-cache-dir --constraint /tmp/constraints.txt -r requirements.txt && \
+    uv pip install --constraint /tmp/constraints.txt 'nemo_toolkit[asr]' && \
+    uv pip install --force-reinstall 'transformers>=4.49.0' && \
+    rm -f /tmp/constraints.txt
 
 # Copy project files (context is filtered by .dockerignore)
 COPY . .
