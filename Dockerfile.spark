@@ -21,15 +21,22 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN uv venv --system-site-packages $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# The NVIDIA base image ships transformer_engine (for FP8 training) which
+# links against a cuBLAS symbol not present at runtime. VoxHub doesn't use
+# FP8 training, so we remove it to prevent "undefined symbol" import crashes.
+# (--system-site-packages exposes all system packages, including broken ones.)
+RUN PYSITE=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    if [ -d "$PYSITE/transformer_engine" ]; then \
+        mv "$PYSITE/transformer_engine" "$PYSITE/_disabled_transformer_engine"; \
+        echo "Disabled transformer_engine at $PYSITE"; \
+    fi
+
 # Install all Python dependencies using uv.
 # The base image provides a custom-built torch (+ torchaudio, torchvision)
 # that is ABI-matched to its CUDA toolkit. These are pre-release builds
 # (e.g. 2.11.0a0) that don't exist on PyPI, so we MUST NOT let uv
-# re-resolve them. We achieve this by:
-#   1. --system-site-packages on the venv (above) so torch is visible
-#   2. Generating an --override file that marks torch/torchaudio/torchvision
-#      as "any version is fine" — this satisfies dependency checks without
-#      pulling from PyPI, since the packages are already installed.
+# re-resolve them. The --override file tells uv "any version is fine" for
+# torch packages, so it accepts the pre-installed system copies.
 COPY requirements.txt ./
 RUN printf 'torch>=0.0.0\ntorchaudio>=0.0.0\ntorchvision>=0.0.0\n' > /tmp/overrides.txt && \
     uv pip install --no-cache-dir --override /tmp/overrides.txt -r requirements.txt && \
