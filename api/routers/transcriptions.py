@@ -10,9 +10,44 @@ from api.config import get_config, ServerConfig, ResponseFormat, VadMode
 from api.middleware import ApiKeyDependency
 from api.transcriber import get_transcription_service, TranscriptionService
 from api.formatters import format_transcription
+from api.routers.embeddings import is_secure
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _attach_speaker_embeddings(
+    response: Response,
+    result_data: dict,
+    response_format: ResponseFormat,
+    request: Request,
+    config: ServerConfig,
+) -> Response:
+    """Inject speaker_embeddings into a JSON response, respecting HTTPS rules.
+
+    If the request was made over plain HTTP, the embeddings are stripped and a
+    warning is added instead.
+    """
+    import json
+    from fastapi.responses import JSONResponse
+
+    # Only inject into JSON-based formats
+    if response_format not in (ResponseFormat.JSON, ResponseFormat.VERBOSE_JSON, ResponseFormat.VTT_JSON):
+        return response
+
+    # Parse existing response body
+    try:
+        body = json.loads(response.body)
+    except Exception:
+        return response
+
+    # HTTPS enforcement: strip embeddings over plain HTTP
+    if not is_secure(request, config):
+        body["warning"] = "speaker_embeddings omitted: HTTPS required"
+        return JSONResponse(content=body)
+
+    body["speaker_embeddings"] = result_data["speaker_embeddings"]
+    return JSONResponse(content=body)
 
 @router.post(
     "/v1/audio/transcriptions",
@@ -35,12 +70,14 @@ async def transcribe_audio(
     ] = ["segment"],
     diarize: Annotated[Optional[bool], Form()] = None,
     vad_mode: Annotated[Optional[str], Form()] = None,
+    return_speaker_embeddings: Annotated[Optional[str], Form()] = "false",
 ):
     """
     OpenAI-compatible transcription endpoint.
     """
     request_id = getattr(request.state, "request_id", "unknown")
     service = get_transcription_service(config)
+    want_embeddings = (return_speaker_embeddings or "").lower() == "true"
 
     # 1. Save uploaded file to temp
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as tmp:
@@ -49,7 +86,6 @@ async def transcribe_audio(
 
     try:
         # 2. Run transcription process
-        # model, language, etc. from form or config defaults
         final_data = await service.transcribe(
             audio_path=temp_path,
             model_spec=model,
@@ -57,12 +93,22 @@ async def transcribe_audio(
             prompt=prompt,
             diarize=diarize,
             vad_mode=vad_mode,
-            request_id=request_id
+            request_id=request_id,
+            return_speaker_embeddings=want_embeddings,
         )
-        
-        # 3. Format result
-        return format_transcription(final_data, response_format)
-        
+
+        # 3. Format result — extract segments list for the formatter
+        segments = final_data["segments"] if isinstance(final_data, dict) else final_data
+        response = format_transcription(segments, response_format)
+
+        # 4. Attach speaker embeddings if requested (JSON formats only)
+        if want_embeddings and isinstance(final_data, dict) and "speaker_embeddings" in final_data:
+            response = _attach_speaker_embeddings(
+                response, final_data, response_format, request, config
+            )
+
+        return response
+
     except Exception as e:
         logger.exception(f"[{request_id}] Transcription failed: {e}")
         raise HTTPException(
@@ -70,7 +116,7 @@ async def transcribe_audio(
             detail=f"Transcription failed: {str(e)}"
         )
     finally:
-        # 4. Clean up temp file
+        # 5. Clean up temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
@@ -115,18 +161,20 @@ async def create_transcription_job(
     response_format: Annotated[ResponseFormat, Form()] = ResponseFormat.JSON,
     diarize: Annotated[Optional[bool], Form()] = None,
     vad_mode: Annotated[Optional[str], Form()] = None,
+    return_speaker_embeddings: Annotated[Optional[str], Form()] = "false",
 ):
     request_id = getattr(request.state, "request_id", "unknown")
     job_id = str(uuid.uuid4())
     service = get_transcription_service(config)
+    want_embeddings = (return_speaker_embeddings or "").lower() == "true"
 
     # 1. Save uploaded file to temp
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as tmp:
         shutil.copyfileobj(file.file, tmp)
         temp_path = tmp.name
 
-    # 2. Create job state
-    service.create_job(job_id)
+    # 2. Create job state (store embedding preference in metadata)
+    service.create_job(job_id, return_speaker_embeddings=want_embeddings)
 
     # 3. Queue background task
     background_tasks.add_task(
@@ -138,9 +186,10 @@ async def create_transcription_job(
         prompt=prompt,
         diarize=diarize,
         vad_mode=vad_mode,
-        request_id=request_id
+        request_id=request_id,
+        return_speaker_embeddings=want_embeddings,
     )
-    
+
     return {
         "job_id": job_id,
         "status": "pending",
@@ -249,6 +298,7 @@ async def delete_job(
 )
 async def get_job_result(
     job_id: str,
+    request: Request,
     config: Annotated[ServerConfig, Depends(get_config)],
     auth: Annotated[None, ApiKeyDependency] = None,
     response_format: ResponseFormat = ResponseFormat.JSON,
@@ -257,11 +307,23 @@ async def get_job_result(
     job = service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     if job["status"] != "completed":
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Job is not completed. Current status: {job['status']}"
         )
-    
-    return format_transcription(job["result"], response_format)
+
+    result = job["result"]
+    response = format_transcription(
+        result["segments"] if isinstance(result, dict) else result,
+        response_format,
+    )
+
+    # Attach speaker embeddings if they were computed for this job
+    if isinstance(result, dict) and "speaker_embeddings" in result:
+        response = _attach_speaker_embeddings(
+            response, result, response_format, request, config
+        )
+
+    return response

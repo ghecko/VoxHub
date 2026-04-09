@@ -67,5 +67,16 @@ class ServerConfig(BaseSettings):
     flash_attn: bool = False
     compile_model: bool = False
 
+    # Embedding security
+    # Voice embeddings are biometric data. By default, cleartext HTTP is allowed
+    # because VoxHub typically runs inside a Docker network (traffic never leaves
+    # the host). Set to false if VoxHub is exposed on a public or untrusted network.
+    allow_insecure_embeddings: bool = Field(
+        default=True,
+        description="Allow embedding extraction/return over plain HTTP. "
+                    "Safe when VoxHub is only reachable within a Docker network. "
+                    "Set to false if exposed publicly."
+    )
+
 def get_config() -> ServerConfig:
     return ServerConfig()
