@@ -14,15 +14,34 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # ── Setup Virtual Environment (Fix PEP 668) ──────────────────────
+# --system-site-packages inherits the base image's torch/torchaudio
+# which are ABI-matched to its CUDA toolkit (pre-release builds that
+# don't exist on PyPI and can't be resolved by uv).
 ENV VIRTUAL_ENV=/opt/venv
-RUN uv venv $VIRTUAL_ENV
+RUN uv venv --system-site-packages $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install all Python dependencies using uv
+# Install all Python dependencies using uv.
+# The --override file tells uv "any version of torch is fine" so it
+# accepts the pre-installed system copies instead of pulling from PyPI.
 COPY requirements.txt ./
-RUN uv pip install --no-cache-dir -r requirements.txt \
-    && uv pip install 'nemo_toolkit[asr]' \
-    && uv pip install --force-reinstall 'transformers>=4.49.0'
+RUN printf 'torch>=0.0.0\ntorchaudio>=0.0.0\ntorchvision>=0.0.0\n' > /tmp/overrides.txt && \
+    uv pip install --no-cache-dir --override /tmp/overrides.txt -r requirements.txt && \
+    uv pip install --override /tmp/overrides.txt 'nemo_toolkit[asr]' && \
+    uv pip install --force-reinstall 'transformers>=4.49.0' && \
+    rm -f /tmp/overrides.txt
+
+# The base image's transformer_engine has a cuBLAS ABI mismatch that
+# crashes at runtime. NeMo only uses safe_import() for it (gracefully
+# handles ImportError), so removing it is safe. We delete from BOTH
+# system and venv site-packages since nemo may reinstall it.
+RUN rm -rf /usr/local/lib/python3.12/dist-packages/transformer_engine \
+           /usr/local/lib/python3.12/dist-packages/transformer_engine*.dist-info \
+           /opt/venv/lib/python3.12/site-packages/transformer_engine \
+           /opt/venv/lib/python3.12/site-packages/transformer_engine*.dist-info && \
+    python -c "import transformer_engine" 2>&1 | grep -q "No module" && \
+    echo "✓ transformer_engine successfully removed" || \
+    echo "⚠ transformer_engine may still be importable"
 
 # Copy project files (context is filtered by .dockerignore)
 COPY . .
