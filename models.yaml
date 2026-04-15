@@ -15,6 +15,10 @@ voxtral:mini-4b:
   class: VoxtralTranscriber
   args:
     model_id: mistralai/Voxtral-Mini-4B-Realtime-2602
+    # On Blackwell (GB10) leave unset — the loader auto-picks "eager" because
+    # the SDPA sliding-window kernel currently raises cudaErrorNotPermitted.
+    # Override here if you want to force "sdpa" or "flash_attention_2".
+    # attn_implementation: eager
   enabled: true
 
 voxtral:small-24b:

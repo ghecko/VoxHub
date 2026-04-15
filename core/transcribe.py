@@ -5,6 +5,22 @@ from typing import Optional, List
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 from transformers.utils import logging as hf_logging
 
+# Voxtral has its own model class in transformers; prefer it over the generic
+# AutoModelForSpeechSeq2Seq head, which doesn't expose Voxtral-specific kwargs.
+try:
+    from transformers import VoxtralRealtimeForConditionalGeneration
+    _HAS_VOXTRAL_REALTIME = True
+except ImportError:  # older transformers
+    VoxtralRealtimeForConditionalGeneration = None  # type: ignore
+    _HAS_VOXTRAL_REALTIME = False
+
+try:
+    from transformers import VoxtralForConditionalGeneration
+    _HAS_VOXTRAL = True
+except ImportError:
+    VoxtralForConditionalGeneration = None  # type: ignore
+    _HAS_VOXTRAL = False
+
 from core.base import BaseTranscriber
 from core.platform import (
     detect_platform,
@@ -80,6 +96,7 @@ class VoxtralTranscriber(BaseTranscriber):
         flash_attn: bool = False,
         compile_model: bool = False,
         transcription_delay_ms: int = 480,
+        attn_implementation: Optional[str] = None,
         **kwargs
     ):
         super().__init__(model_id, device)
@@ -87,8 +104,12 @@ class VoxtralTranscriber(BaseTranscriber):
         self.flash_attn = flash_attn
         self.compile_model = compile_model
         self.transcription_delay_ms = transcription_delay_ms
+        # If unset, we choose at load() time based on the platform. On Blackwell
+        # (GB10) the SDPA sliding-window attention kernel currently crashes
+        # with cudaErrorNotPermitted on Voxtral, so we default to "eager" there.
+        self.attn_implementation = attn_implementation
         self.supports_context_carry = True
-        
+
         # Internal state
         self.model = None
         self.processor = None
@@ -118,6 +139,19 @@ class VoxtralTranscriber(BaseTranscriber):
         quantization_config = _build_quantization_config(self.platform, self.precision, self.model_id)
         torch_dtype = get_torch_dtype(self.platform, self.precision)
 
+        # Resolve attention implementation:
+        #   explicit constructor arg > flash_attn flag > platform default
+        if self.attn_implementation:
+            attn_impl = self.attn_implementation
+        elif self.flash_attn:
+            attn_impl = "flash_attention_2"
+        elif self.platform == "blackwell":
+            # GB10 / sm_120: sliding-window SDPA kernel is broken in current
+            # torch builds and raises cudaErrorNotPermitted. Eager is safe.
+            attn_impl = "eager"
+        else:
+            attn_impl = "sdpa"
+
         prev_verbosity = hf_logging.get_verbosity()
         hf_logging.set_verbosity_error()
         try:
@@ -125,16 +159,36 @@ class VoxtralTranscriber(BaseTranscriber):
                 torch_dtype=torch_dtype,
                 device_map=device_map,
                 trust_remote_code=True,
+                attn_implementation=attn_impl,
             )
             if quantization_config is not None:
                 load_kwargs["quantization_config"] = quantization_config
-            if self.flash_attn:
-                load_kwargs["attn_implementation"] = "sdpa"
 
-            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self.model_id,
-                **load_kwargs,
-            )
+            # Pick the most specific model class available, per the official
+            # Voxtral docs. Falls back to AutoModelForSpeechSeq2Seq for older
+            # transformers releases.
+            model_cls = None
+            if self._is_realtime and _HAS_VOXTRAL_REALTIME:
+                model_cls = VoxtralRealtimeForConditionalGeneration
+            elif (not self._is_realtime) and _HAS_VOXTRAL:
+                model_cls = VoxtralForConditionalGeneration
+            else:
+                model_cls = AutoModelForSpeechSeq2Seq
+
+            try:
+                self.model = model_cls.from_pretrained(self.model_id, **load_kwargs)
+            except (ValueError, TypeError) as e:
+                # Some attention backends aren't supported by every model;
+                # fall back to eager so the run still completes.
+                if attn_impl != "eager" and "attn_implementation" in str(e).lower():
+                    logging.getLogger(__name__).warning(
+                        "attn_implementation=%s rejected (%s); retrying with eager",
+                        attn_impl, e,
+                    )
+                    load_kwargs["attn_implementation"] = "eager"
+                    self.model = model_cls.from_pretrained(self.model_id, **load_kwargs)
+                else:
+                    raise
 
             if self.compile_model:
                 self.model = torch.compile(self.model, mode="reduce-overhead")
@@ -183,11 +237,12 @@ class VoxtralTranscriber(BaseTranscriber):
         if not self._is_realtime:
             return super().transcribe_batch(audio_segments)
 
+        target_dtype = getattr(self.model, "dtype", self._input_dtype)
         inputs = self.processor(
-            audio=audio_segments,
+            audio_segments,
             return_tensors="pt",
             padding=True,
-        ).to(self.model.device, dtype=self._input_dtype)
+        ).to(self.model.device, dtype=target_dtype)
 
         longest = max(len(a) for a in audio_segments)
         max_new_tokens = max(64, int((longest / 16000) * 10))
@@ -199,13 +254,21 @@ class VoxtralTranscriber(BaseTranscriber):
         return [t.strip() for t in transcriptions]
 
     def _prepare_inputs(self, audio: np.ndarray, context: Optional[str] = None, language: Optional[str] = None):
+        # Always use the model's actual dtype to avoid bf16/fp16 mismatches
+        # after quantization or auto-dtype loading.
+        target_dtype = getattr(self.model, "dtype", self._input_dtype)
+
         if self._is_realtime:
-            kwargs = dict(audio=audio, return_tensors="pt")
+            # Match the official Voxtral example signature exactly:
+            #   processor(audio_array, return_tensors="pt")
+            # Passing context as `text=` gives the LM a prior-turn prefix,
+            # which materially improves short-utterance disambiguation
+            # ("Okay" / "Merci" / "bien sûr" cases).
+            kwargs = {"return_tensors": "pt"}
             if context:
                 kwargs["text"] = " ".join(context.split()[-30:])
-            # Voxtral doesn't explicitly support a 'language' tag in current processor, 
-            # but we could potentially wrap it in a prompt if needed.
-            return self.processor(**kwargs).to(self.model.device, dtype=self._input_dtype)
+            inputs = self.processor(audio, **kwargs)
+            return inputs.to(self.model.device, dtype=target_dtype)
         else:
             inputs = self.processor.apply_transcription_request(
                 audio=[audio],
@@ -213,4 +276,4 @@ class VoxtralTranscriber(BaseTranscriber):
                 sampling_rate=16000,
                 model_id=self.model_id,
             )
-            return inputs.to(self.model.device, dtype=self._input_dtype)
+            return inputs.to(self.model.device, dtype=target_dtype)
