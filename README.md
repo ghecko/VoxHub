@@ -41,6 +41,43 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
   -F response_format=verbose_json
 ```
 
+### Cross-project networking
+
+The `voxhub-api` service joins an external Docker network named `proxy-net`
+so sibling compose stacks (e.g. OpenHiNotes) can reach it by hostname at
+`http://voxhub-api:8000` instead of going through `localhost`.
+
+Create the network once on the host (no-op if it already exists):
+
+```bash
+docker network create proxy-net 2>/dev/null || true
+```
+
+Then on the client project (sibling `docker-compose.yaml`), attach the same
+network and target the hostname:
+
+```yaml
+services:
+  openhinotes:
+    networks:
+      - default
+      - proxy-net
+    environment:
+      - VOXHUB_URL=http://voxhub-api:8000
+
+networks:
+  proxy-net:
+    external: true
+    name: proxy-net
+```
+
+Verify resolution from inside the client container:
+
+```bash
+docker compose exec openhinotes getent hosts voxhub-api
+docker compose exec openhinotes curl -sS http://voxhub-api:8000/v1/models
+```
+
 ---
 
 ## Supported Models

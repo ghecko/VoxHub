@@ -63,6 +63,11 @@ services:
       context: .
       dockerfile: Dockerfile.spark
     image: voxhub-api:spark
+    # Pin the container name and hostname so other compose projects on the
+    # shared network can address it as http://voxhub-api:8000 regardless of
+    # this project's directory name (which compose otherwise prefixes).
+    container_name: voxhub-api
+    hostname: voxhub-api
     ports:
       - "8000:8000"
     deploy:
@@ -84,6 +89,24 @@ services:
       - VOXHUB_DIARIZE=true
       - VOXHUB_DEVICE=auto
     entrypoint: ["python", "server.py"]
+    networks:
+      - default       # keeps intra-project links working
+      - proxy-net     # shared network reachable from sibling compose stacks
 
 volumes:
   multi_hf_cache:
+
+networks:
+  # External shared network for cross-project DNS resolution. Sibling compose
+  # projects (e.g. OpenHiNotes) attach to the same network and can then
+  # reach this service at http://voxhub-api:8000.
+  #
+  # The network is declared `external` here on purpose — VoxHub does not own
+  # it, it just joins it. Whichever stack creates it first should declare it,
+  # the rest reference it as external. If no other project creates it, run:
+  #     docker network create proxy-net
+  #
+  # See README ("Cross-project networking") for the OpenHiNotes-side block.
+  proxy-net:
+    external: true
+    name: proxy-net
