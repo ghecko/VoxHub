@@ -1,6 +1,6 @@
 # VoxHub
 
-**Multi-model transcription platform with an OpenAI-compatible API.** Run Voxtral, Whisper, Moonshine, and Canary side-by-side — with advanced VAD, speaker diarization, and optional benchmarking. Optimized for NVIDIA Blackwell (GB10/GX10), CUDA, ROCm, and CPU.
+**Multi-model transcription platform with an OpenAI-compatible API.** Run Voxtral, Whisper, Granite Speech, Moonshine, and Canary side-by-side — with advanced VAD, speaker diarization, and optional benchmarking. Optimized for NVIDIA Blackwell (GB10/GX10), CUDA, ROCm, and CPU.
 
 ---
 
@@ -49,10 +49,46 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 | :--- | :--- | :--- | :--- |
 | **Voxtral** | `voxtral:mini-4b`, `voxtral:small-24b` | Transformers | Real-time native support, HQ French/English |
 | **Whisper** | `whisper:large-v3`, `whisper:turbo`, `whisper:small` | Transformers | Global benchmark leader, extreme throughput |
+| **Granite Speech** | `granite:1b-speech` | Transformers | IBM multilingual (en/fr/de/es/pt/ja), edge-friendly 1B |
 | **Moonshine** | `moonshine:base`, `moonshine:tiny` | Transformers | Ultra-low latency, CPU-efficient |
 | **Canary** | `canary:1b` | NeMo | SOTA accuracy, multi-task (ASR/translation) |
 
 Models are defined in `models.yaml` and loaded lazily on first request.
+
+> **Granite Speech note:** the model bundles a LoRA adapter that transformers
+> enables during inference, so `peft` is required (already listed in
+> `requirements.txt`). Transcription is driven by a chat template — VoxHub
+> wraps the audio with `<|audio|>` plus a per-language instruction
+> automatically; no extra configuration is needed.
+
+### Automatic Language Detection
+
+Backends that need an explicit language hint (Granite Speech, Canary
+multilingual mode, etc.) get one automatically: when a request omits
+`language` (or passes `auto`), VoxHub probes the first 30 seconds of audio
+with **whisper-tiny** and forwards the detected ISO-639-1 code to the active
+backend. **Whisper and Voxtral backends are skipped** — both detect language
+natively and re-running detection would only add latency.
+
+The probe model is small (~75 MB), loads in about a second on first use, and
+adds well under a second of latency per job. Tune via env vars:
+
+```bash
+# Disable auto-detect entirely (clients must pass language= themselves)
+VOXHUB_AUTO_DETECT_LANGUAGE=false
+
+# Use a larger probe model if you need more accuracy on noisy audio
+VOXHUB_LANG_DETECT_MODEL=openai/whisper-base
+```
+
+You can still force a language per request to skip detection:
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F file=@audio/meeting.mp3 \
+  -F model=granite:1b-speech \
+  -F language=fr
+```
 
 ---
 

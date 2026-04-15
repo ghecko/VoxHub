@@ -67,6 +67,19 @@ class ServerConfig(BaseSettings):
     flash_attn: bool = False
     compile_model: bool = False
 
+    # Automatic language detection. When the request has no `language` (or
+    # passes "auto"), VoxHub probes the first 30s with a small Whisper model
+    # and forwards the detected ISO code to the active backend. Whisper
+    # backends are skipped (they detect internally).
+    auto_detect_language: bool = Field(
+        default=True,
+        description="Auto-detect spoken language for backends that need a hint",
+    )
+    lang_detect_model: str = Field(
+        default="openai/whisper-tiny",
+        description="HF model id used for language probing",
+    )
+
     # Embedding security
     # Voice embeddings are biometric data. By default, cleartext HTTP is allowed
     # because VoxHub typically runs inside a Docker network (traffic never leaves

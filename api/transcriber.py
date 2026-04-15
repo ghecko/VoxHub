@@ -9,6 +9,7 @@ from core.audio import load_audio
 from core.registry import create_transcriber, list_supported_models, normalize_model_spec
 from core.vad import UnifiedVAD
 from core.segments import sanitize_segments, BoundaryRefiner
+from core.lang_detect import WhisperLanguageDetector
 from api.config import ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,21 @@ class TranscriptionService:
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         self._vad_engines: Dict[str, UnifiedVAD] = {}
         self._boundary_refiner: Optional[BoundaryRefiner] = None
+        self._lang_detector: Optional[WhisperLanguageDetector] = None
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._cancel_flags: Dict[str, asyncio.Event] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+
+    def _get_lang_detector(self) -> Optional[WhisperLanguageDetector]:
+        """Lazy-construct the Whisper-based language detector."""
+        if not getattr(self.config, "auto_detect_language", True):
+            return None
+        if self._lang_detector is None:
+            self._lang_detector = WhisperLanguageDetector(
+                model_id=getattr(self.config, "lang_detect_model", "openai/whisper-tiny"),
+                device=str(self.config.device.value if hasattr(self.config.device, "value") else self.config.device),
+            )
+        return self._lang_detector
 
     def _get_boundary_refiner(self) -> Optional[BoundaryRefiner]:
         """Lazy-load the wav2vec2 boundary refiner."""
@@ -209,6 +222,36 @@ class TranscriptionService:
                 self._update_job(job_id, stage="loading")
             logger.info(f"[{request_id}] Loading audio: {audio_path}")
             audio = await asyncio.to_thread(load_audio, audio_path)
+
+            # 1b. Optional language auto-detect.
+            #   - Skipped if the request supplied an explicit language (other than "auto").
+            #   - Skipped for backends that detect natively:
+            #       * whisper:*  — Whisper's own decoder picks the language.
+            #       * voxtral:*  — Mistral confirms native auto-detection
+            #                      across all 13 supported languages.
+            #   - On failure we silently proceed with language=None.
+            _NATIVE_LID_PREFIXES = ("whisper:", "voxtral:")
+            normalized_lang = (language or "").strip().lower()
+            needs_detection = (
+                normalized_lang in ("", "auto")
+                and not model_spec.startswith(_NATIVE_LID_PREFIXES)
+            )
+            if needs_detection:
+                detector = self._get_lang_detector()
+                if detector is not None:
+                    if job_id:
+                        self._update_job(job_id, stage="detecting_language")
+                    detected = await asyncio.to_thread(detector.detect, audio)
+                    if detected:
+                        logger.info(
+                            f"[{request_id}] Auto-detected language: {detected}"
+                        )
+                        language = detected
+                    else:
+                        logger.info(
+                            f"[{request_id}] Language detection inconclusive; "
+                            f"proceeding without hint"
+                        )
 
             # 2. Run VAD/Diarization
             if job_id:

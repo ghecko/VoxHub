@@ -57,6 +57,17 @@ whisper:small:
     model_size: small
   enabled: true
 
+# ── Granite Speech (IBM) ───────────────────────────────────────
+# Multilingual (en, fr, de, es, pt, ja). Ships a LoRA adapter — requires peft.
+granite:1b-speech:
+  module: core.transcribe_granite
+  class: GraniteSpeechTranscriber
+  args:
+    model_id: ibm-granite/granite-4.0-1b-speech
+    # Auto-eager on Blackwell; override here to force a specific backend.
+    # attn_implementation: sdpa
+  enabled: true
+
 # ── Moonshine (UsefulSensors) ──────────────────────────────────
 # Note: Moonshine is English-only.
 moonshine:base:

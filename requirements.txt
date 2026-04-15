@@ -9,6 +9,7 @@ numpy
 soundfile
 transformers>=4.49.0
 accelerate
+peft  # Required by ibm-granite/granite-4.0-1b-speech (bundled LoRA adapter)
 fastsafetensors>=0.1.10
 silero-vad
 # Whisper now uses transformers (no faster-whisper / CTranslate2 needed)
