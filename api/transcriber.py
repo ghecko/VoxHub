@@ -304,7 +304,12 @@ class TranscriptionService:
 
             # Build a progress callback that maps the VAD engine's 0–1
             # fraction into the overall progress bar range for this phase.
+            # Not all pyannote versions support the internal hook, so the
+            # callback may never fire — the heartbeat below covers that gap.
+            _last_vad_frac = [0.0]  # mutable ref shared with heartbeat
+
             def _vad_progress(stage_name: str, frac: float):
+                _last_vad_frac[0] = frac
                 self._job_progress(
                     job_id,
                     self._lerp(self._PROG_VAD, frac),
@@ -312,12 +317,52 @@ class TranscriptionService:
                 )
 
             vad_engine = self.get_vad(vad_mode)
-            segments = await asyncio.to_thread(
-                vad_engine.detect,
-                audio,
-                diarize=diarize,
-                on_progress=_vad_progress,
+
+            # Run VAD in a background thread, with a concurrent heartbeat
+            # that provides estimated progress when the VAD engine doesn't
+            # report its own steps (e.g. pyannote community pipeline).
+            #
+            # Estimate: diarization takes roughly 0.3–0.7× real-time on
+            # GPU.  We use 0.5× as a baseline and cap at 90 % of the VAD
+            # range so the bar never visually "stalls at 100 %".
+            audio_duration = len(audio) / 16000
+            estimated_seconds = max(audio_duration * 0.5, 10)
+
+            vad_future = asyncio.ensure_future(
+                asyncio.to_thread(
+                    vad_engine.detect,
+                    audio,
+                    diarize=diarize,
+                    on_progress=_vad_progress,
+                )
             )
+
+            heartbeat_interval = 5  # seconds
+            heartbeat_start = time.time()
+            while not vad_future.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(vad_future),
+                        timeout=heartbeat_interval,
+                    )
+                except asyncio.TimeoutError:
+                    pass  # expected — VAD still running
+                if not vad_future.done() and job_id:
+                    elapsed = time.time() - heartbeat_start
+                    # Estimated fraction, capped at 0.90 so the bar
+                    # doesn't reach "done" before VAD actually finishes.
+                    est_frac = min(elapsed / estimated_seconds, 0.90)
+                    # Only use the estimate if the VAD engine's own
+                    # callback hasn't already reported further progress.
+                    if est_frac > _last_vad_frac[0]:
+                        stage = "diarizing" if diarize else "vad"
+                        self._job_progress(
+                            job_id,
+                            self._lerp(self._PROG_VAD, est_frac),
+                            stage=stage,
+                        )
+
+            segments = vad_future.result()
 
             # 2b. Sanitize segments (overlap resolution, micro-turn absorption)
             self._job_progress(job_id, self._PROG_SANITIZE[0])
