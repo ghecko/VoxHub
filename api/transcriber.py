@@ -207,9 +207,13 @@ class TranscriptionService:
     _PROG_LANG_DETECT  = (5,  8)    # language detection
     _PROG_VAD          = (8, 45)    # VAD + diarization
     _PROG_SANITIZE     = (45, 48)   # segment sanitisation / boundary refinement
-    _PROG_MODEL_LOAD   = (48, 52)   # transcription model load
+    _PROG_MODEL_LOAD   = (48, 51)   # transcription model load
     _PROG_TRANSCRIBE   = (52, 95)   # segment-by-segment transcription
     _PROG_EMBEDDINGS   = (95, 100)  # speaker embedding extraction
+    # NOTE: the 1-point gap between MODEL_LOAD end (51) and TRANSCRIBE
+    # start (52) is intentional — it guarantees a progress change when
+    # entering the transcription loop, which resets the stale-job timer
+    # in polling consumers.
 
     def _job_progress(self, job_id: Optional[str], progress: float,
                       stage: Optional[str] = None, **extra):
@@ -356,13 +360,19 @@ class TranscriptionService:
                         f"(segment {i}/{len(segments)})"
                     )
 
-                # Update progress on every segment (not just every 5th) for
-                # smoother feedback and more frequent stale-timer resets.
-                seg_frac = (i + 1) / max(len(segments), 1)
-                seg_progress = self._lerp(self._PROG_TRANSCRIBE, seg_frac)
-                if i % 5 == 0 or i == len(segments) - 1:
-                    logger.info(f"[{request_id}] Progress: {i+1}/{len(segments)} segments processed")
-                self._job_progress(job_id, seg_progress)
+                n_segs = max(len(segments), 1)
+
+                # ── Pre-inference progress ──
+                # Report the START of this segment's slice so the bar
+                # reflects "working on segment i" rather than jumping to
+                # the finished position before the work is done.  This is
+                # critical for single-segment jobs where the only inference
+                # call (+ FP8 decompression on first use) can take minutes.
+                pre_frac = i / n_segs
+                self._job_progress(
+                    job_id,
+                    self._lerp(self._PROG_TRANSCRIBE, pre_frac),
+                )
 
                 start_samp = int(seg["start"] * sampling_rate)
                 end_samp = int(seg["end"] * sampling_rate)
@@ -389,6 +399,13 @@ class TranscriptionService:
                     language=language,
                     context=context,
                 )
+
+                # ── Post-inference progress ──
+                post_frac = (i + 1) / n_segs
+                post_progress = self._lerp(self._PROG_TRANSCRIBE, post_frac)
+                if i % 5 == 0 or i == len(segments) - 1:
+                    logger.info(f"[{request_id}] Progress: {i+1}/{len(segments)} segments processed")
+                self._job_progress(job_id, post_progress)
 
                 if not text or not text.strip():
                     continue
