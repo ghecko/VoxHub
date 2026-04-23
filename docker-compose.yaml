@@ -205,9 +205,19 @@ volumes:
   multi_hf_cache:
 
 networks:
+  # Default project network — implicit, but declared here so the YAML
+  # block is a valid mapping even if the external network below is
+  # disabled.
+  default:
+
   # Private network owned by the OpenHiNotes compose project. VoxHub joins
   # it as `external` so the OpenHiNotes backend can reach voxhub-api at
   # http://voxhub-api:8000 over a closed bridge — never via Caddy / LAN.
   #
   # The network must already exist when VoxHub starts. The OpenHiNotes
-  # compose stack c
+  # compose stack creates it on `up`. If its actual docker network name
+  # includes a project prefix (e.g. `openhinotes_hinotes-internal`), set
+  # `name:` below to that value.
+  hinotes-internal:
+    external: true
+    # name: openhinotes_hinotes-internal
