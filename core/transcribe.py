@@ -90,7 +90,7 @@ def _build_quantization_config(platform: str, precision: str, model_id: str = ""
 class VoxtralTranscriber(BaseTranscriber):
     def __init__(
         self,
-        model_id: str = "mistralai/Voxtral-Mini-4B-Realtime-2602",
+        model_id: str = "mistralai/Voxtral-Mini-3B-2507",
         device: str = "auto",
         precision: str = "auto",
         flash_attn: bool = False,
@@ -141,15 +141,30 @@ class VoxtralTranscriber(BaseTranscriber):
 
         # Resolve attention implementation:
         #   explicit constructor arg > flash_attn flag > platform default
+        #
+        # Platform defaults (as of 2026-04):
+        #   - blackwell (sm_120/sm_121, GB10/B200 consumer): "eager"
+        #       * SDPA sliding-window kernel still raises cudaErrorNotPermitted
+        #         on Voxtral in current torch builds.
+        #       * Upstream Dao-AILab/flash-attention does not ship official
+        #         wheels for sm_120+; FA4 targets B200/GB200 only. Community
+        #         wheels exist but we don't want to force that choice.
+        #   - cuda (sm_80/sm_86/sm_89/sm_90 Ampere/Ada/Hopper): "flash_attention_2"
+        #       * Best throughput on Voxtral when the flash-attn wheel is
+        #         available. If it's not installed (ImportError / ValueError
+        #         at load time), the except-clause below falls back to eager
+        #         and logs a clear hint.
+        #   - rocm / cpu: "sdpa" (FA2 is NVIDIA-only).
         if self.attn_implementation:
             attn_impl = self.attn_implementation
         elif self.flash_attn:
             attn_impl = "flash_attention_2"
         elif self.platform == "blackwell":
-            # GB10 / sm_120: sliding-window SDPA kernel is broken in current
-            # torch builds and raises cudaErrorNotPermitted. Eager is safe.
             attn_impl = "eager"
+        elif self.platform == "cuda":
+            attn_impl = "flash_attention_2"
         else:
+            # rocm, cpu, unknown — SDPA is safe everywhere
             attn_impl = "sdpa"
 
         prev_verbosity = hf_logging.get_verbosity()
@@ -177,13 +192,31 @@ class VoxtralTranscriber(BaseTranscriber):
 
             try:
                 self.model = model_cls.from_pretrained(self.model_id, **load_kwargs)
-            except (ValueError, TypeError) as e:
-                # Attention backend not supported — retry with eager
-                if attn_impl != "eager" and "attn_implementation" in str(e).lower():
-                    logging.getLogger(__name__).warning(
-                        "attn_implementation=%s rejected (%s); retrying with eager",
-                        attn_impl, e,
-                    )
+            except (ValueError, TypeError, ImportError) as e:
+                # Attention backend not supported — retry with eager.
+                # ImportError catches the "flash-attn is not installed" case
+                # that transformers raises when attn_implementation=flash_attention_2
+                # is requested without the flash-attn wheel available.
+                err_text = str(e).lower()
+                is_attn_error = (
+                    "attn_implementation" in err_text
+                    or "flash_attn" in err_text
+                    or "flash-attn" in err_text
+                )
+                if attn_impl != "eager" and is_attn_error:
+                    log = logging.getLogger(__name__)
+                    if attn_impl == "flash_attention_2":
+                        log.warning(
+                            "Flash Attention 2 unavailable (%s); falling back to 'eager'. "
+                            "Install `flash-attn` in your CUDA image for ~1.5-2x faster "
+                            "Voxtral inference. See requirements-cuda.txt.",
+                            e,
+                        )
+                    else:
+                        log.warning(
+                            "attn_implementation=%s rejected (%s); retrying with 'eager'",
+                            attn_impl, e,
+                        )
                     load_kwargs["attn_implementation"] = "eager"
                     self.model = model_cls.from_pretrained(self.model_id, **load_kwargs)
                 else:

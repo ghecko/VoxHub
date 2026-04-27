@@ -190,7 +190,7 @@ Same as `/v1/audio/transcriptions`, except `temperature` and `timestamp_granular
 ```bash
 curl -X POST http://localhost:8000/v1/audio/transcriptions/jobs \
   -F file=@long_recording.mp3 \
-  -F model=voxtral:mini-4b \
+  -F model=voxtral:mini-3b \
   -F vad_mode=pyannote \
   -F diarize=true
 ```
@@ -375,7 +375,7 @@ List all models registered in `models.yaml` (OpenAI-compatible format).
   "data": [
     { "id": "whisper:turbo", "object": "model", "owned_by": "voxhub", "permission": [] },
     { "id": "whisper:large-v3", "object": "model", "owned_by": "voxhub", "permission": [] },
-    { "id": "voxtral:mini-4b", "object": "model", "owned_by": "voxhub", "permission": [] }
+    { "id": "voxtral:mini-3b", "object": "model", "owned_by": "voxhub", "permission": [] }
   ]
 }
 ```
@@ -458,8 +458,10 @@ Models follow the `family:variant` naming convention. Available models (from `mo
 | `whisper:large-v3` | Whisper (OpenAI) | Highest accuracy Whisper variant |
 | `whisper:small` | Whisper (OpenAI) | Lightweight, lower VRAM |
 | `whisper:medium` | Whisper (OpenAI) | Mid-range (disabled by default) |
-| `voxtral:mini-4b` | Voxtral (Mistral) | Real-time capable, strong French/English |
-| `voxtral:small-24b` | Voxtral (Mistral) | High quality, large model (disabled by default) |
+| `voxtral:mini-3b` | Voxtral (Mistral, transformers) | Strong French/English, beats Whisper large-v3 on FLEURS, in-process |
+| `voxtral:mini-3b-vllm` | Voxtral (Mistral, vLLM) | Same weights served by the `voxtral-vllm` container. Higher throughput; requires `docker compose --profile vllm up`. |
+| `voxtral:small-24b` | Voxtral (Mistral, transformers) | High quality, large model (disabled by default) |
+| `voxtral:small-24b-vllm` | Voxtral (Mistral, vLLM) | High-quality model served remotely via vLLM (disabled by default) |
 | `moonshine:base` | Moonshine (UsefulSensors) | Ultra-low latency, **English only** |
 | `moonshine:tiny` | Moonshine (UsefulSensors) | Minimal footprint (disabled by default) |
 | `canary:1b` | Canary (NVIDIA NeMo) | SOTA accuracy, multi-task |
@@ -518,9 +520,4 @@ All errors return JSON:
 
 | Status | Meaning |
 |:-------|:--------|
-| `400` | Job not yet completed (when fetching result) |
-| `401` | Missing API key (when `VOXHUB_API_KEY` is configured) |
-| `403` | Invalid API key |
-| `404` | Job not found (or already purged), or model not loaded (for unload) |
-| `409` | Conflict: job cannot be cancelled (already terminal) or deleted (still running) |
-| `500` | Transcription or internal server error |
+| `400` | Job not yet 

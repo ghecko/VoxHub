@@ -10,20 +10,56 @@
 #   enabled: Set to false to skip this model in --model all runs
 
 # ── Voxtral (Mistral) ──────────────────────────────────────────
-voxtral:mini-4b:
+# Two backends are available per Voxtral model:
+#   voxtral:<name>        – in-process via HuggingFace transformers
+#                           (lazy-loaded, zero extra infra, good for dev)
+#   voxtral:<name>-vllm   – remote via the voxtral-vllm compose service
+#                           (higher throughput, requires `--profile vllm`)
+# Both can be enabled at the same time; the model chosen at request time
+# (`model=voxtral:mini-3b` vs `model=voxtral:mini-3b-vllm`) decides which
+# path runs. See README for the full tradeoffs.
+
+# --- Transformers backend (default, in-process) ---
+voxtral:mini-3b:
   module: core.transcribe
   class: VoxtralTranscriber
   args:
-    model_id: mistralai/Voxtral-Mini-4B-Realtime-2602
-    # On Blackwell (GB10) leave unset — the loader auto-picks "eager" because
-    # the SDPA sliding-window kernel currently raises cudaErrorNotPermitted.
-    # Override here if you want to force "sdpa" or "flash_attention_2".
+    model_id: mistralai/Voxtral-Mini-3B-2507
+    # Attention backend is auto-resolved by core/transcribe.py:
+    #   blackwell (GB10/B200)  → "eager"            (SDPA sw-window bug; FA2 no official wheel)
+    #   cuda (Ampere/Ada/Hop.) → "flash_attention_2" (fallback to eager if flash-attn missing)
+    #   rocm / cpu             → "sdpa"
+    # Override by uncommenting one of:
+    # attn_implementation: sdpa
     # attn_implementation: eager
+    # attn_implementation: flash_attention_2
   enabled: true
 
 voxtral:small-24b:
   module: core.transcribe
   class: VoxtralTranscriber
+  args:
+    model_id: mistralai/Voxtral-Small-24B-2507
+  enabled: false  # Large model, enable when needed
+
+# --- vLLM backend (remote, opt-in via docker compose --profile vllm) ---
+# The VoxHub-side class holds only an HTTP client — zero extra GPU memory
+# in the API container. The Voxtral weights live in the `voxtral-vllm`
+# service, which loads them on container start. If that service is not
+# running, `load()` will fail fast with an actionable error.
+voxtral:mini-3b-vllm:
+  module: core.transcribe_voxtral_vllm
+  class: VoxtralVLLMTranscriber
+  args:
+    model_id: mistralai/Voxtral-Mini-3B-2507
+    # base_url falls back to the VOXTRAL_VLLM_URL env var
+    # (defaults to http://voxtral-vllm:8000/v1 in docker-compose).
+    # base_url: http://voxtral-vllm:8000/v1
+  enabled: true
+
+voxtral:small-24b-vllm:
+  module: core.transcribe_voxtral_vllm
+  class: VoxtralVLLMTranscriber
   args:
     model_id: mistralai/Voxtral-Small-24B-2507
   enabled: false  # Large model, enable when needed
@@ -81,21 +117,4 @@ moonshine:tiny:
   module: core.transcribe_moonshine
   class: MoonshineTranscriber
   args:
-    model_name: UsefulSensors/moonshine-tiny-ar
-  enabled: false
-
-# ── Canary (NVIDIA NeMo) ──────────────────────────────────────
-canary:1b:
-  module: core.transcribe_canary
-  class: CanaryTranscriber
-  args:
-    model_name: nvidia/canary-1b
-  enabled: true
-
-# ── Add your own models below ─────────────────────────────────
-# example:custom-model:
-#   module: core.transcribe_whisper
-#   class: WhisperTranscriber
-#   args:
-#     model_size: large-v3
-#   enabled: true
+    model_name

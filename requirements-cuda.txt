@@ -17,3 +17,23 @@ compressed-tensors
 # fp_quant is required by transformers FPQuantConfig
 # qutlass provides the NVFP4 CUTLASS kernels (build from source)
 #   see: https://github.com/IST-DASLab/QuTLASS
+
+# ── Flash Attention 2 (optional but recommended) ────────────────
+# Since 2026-04, Voxtral defaults to attn_implementation="flash_attention_2"
+# on Ampere/Ada/Hopper CUDA GPUs (sm_80/86/89/90). If flash-attn is not
+# available, core/transcribe.py transparently falls back to eager and logs
+# a hint — so this dep is NOT required for correctness, only for speed
+# (~1.5-2x on Voxtral inference).
+#
+# NOT installed by default for two reasons:
+#   1. The wheel build is ~20 min on first install and needs a matching
+#      torch+CUDA combo, which is fragile in generic CI.
+#   2. The NGC PyTorch image used by Dockerfile.spark (Blackwell/GB10)
+#      already ships with flash-attn baked in — but Blackwell uses eager
+#      by default anyway (see core/transcribe.py for the reasoning).
+#
+# Enable locally or in Dockerfile.cuda with:
+#   pip install flash-attn --no-build-isolation
+# Or pin a pre-built wheel:
+#   pip install flash-attn==2.8.3 --no-build-isolation
+# flash-attn

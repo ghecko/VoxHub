@@ -22,7 +22,7 @@ COPY . .
 # Model to use — override at build time or run time:
 #   docker build --build-arg MODEL_ID=your-org/custom-model ...
 #   docker run -e MODEL_ID=your-org/custom-model ...
-ARG MODEL_ID=mistralai/Voxtral-Mini-4B-Realtime-2602
+ARG MODEL_ID=mistralai/Voxtral-Mini-3B-2507
 ENV MODEL_ID=${MODEL_ID}
 ENV HF_HOME=/app/models
 ENV PYTHONPATH=/app

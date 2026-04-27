@@ -23,3 +23,10 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 python-multipart
 pydantic-settings
+
+# ── Optional: vLLM backend client ──────────────────────────────
+# Used by core/transcribe_voxtral_vllm.py to talk to a remote vLLM
+# server via the OpenAI-compatible /v1/audio/transcriptions endpoint.
+# The vLLM server itself is NOT installed here — it runs as a
+# separate container (see `voxtral-vllm` service in docker-compose.yaml).
+openai>=1.0

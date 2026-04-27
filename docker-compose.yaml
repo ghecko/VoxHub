@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile.spark
       args:
-        MODEL_ID: ${MODEL_ID:-mistralai/Voxtral-Mini-4B-Realtime-2602}
+        MODEL_ID: ${MODEL_ID:-mistralai/Voxtral-Mini-3B-2507}
         PREDOWNLOAD_MODEL: ${PREDOWNLOAD_MODEL:-1}
     image: voxhub:spark
     deploy:
@@ -22,7 +22,7 @@ services:
       - multi_hf_cache:/app/models
     environment:
       - HF_TOKEN=${HF_TOKEN}
-      - MODEL_ID=${MODEL_ID:-mistralai/Voxtral-Mini-4B-Realtime-2602}
+      - MODEL_ID=${MODEL_ID:-mistralai/Voxtral-Mini-3B-2507}
     command: --help
 
   # Legacy/Other platform fallbacks (kept for compatibility)
@@ -56,6 +56,106 @@ services:
     environment:
       - HF_TOKEN=${HF_TOKEN}
     command: --help --device cpu
+
+  # ─── vLLM backend for Voxtral (opt-in) ────────────────────────
+  # A standalone vLLM server that hosts Voxtral in its own container and
+  # exposes the OpenAI-compatible /v1/audio/transcriptions endpoint.
+  # VoxHub talks to it via http://voxtral-vllm:8000/v1 on the default
+  # compose network.
+  #
+  # Activation:
+  #   docker compose --profile vllm up -d voxtral-vllm
+  # Or together with the API:
+  #   docker compose --profile vllm up -d voxhub-api voxtral-vllm
+  #
+  # Memory: this container holds Voxtral in GPU memory as long as it runs.
+  # If you don't want that cost, simply don't start the 'vllm' profile —
+  # VoxHub will keep working with its transformers-based backend
+  # (voxtral:mini-3b), which loads lazily on first request.
+  voxtral-vllm:
+    # Default image is the upstream vLLM OpenAI server. Override via
+    # VOXTRAL_VLLM_IMAGE if your hardware needs a different build — e.g. on
+    # NVIDIA Spark / GB10 (Blackwell sm_120), where upstream wheels aren't
+    # published yet and you'll typically build vLLM against the Spark CUDA
+    # base image (see README → "Using a custom vLLM image").
+    #
+    # Heads up when overriding:
+    #   1. The `command:` below assumes the upstream entrypoint (`vllm serve`).
+    #      If your custom image uses a different entrypoint (e.g. `python` or
+    #      a bare shell), either set `entrypoint: ["vllm", "serve"]` here, or
+    #      prepend the serve invocation to the `command:` list.
+    #   2. Voxtral's dummy-input profiling loads audio, which requires
+    #      `mistral-common[soundfile]`. The upstream image ships it; custom
+    #      images often don't. Install it in your Dockerfile to avoid the
+    #      `ImportError: soundfile is not installed` crash at startup.
+    image: ${VOXTRAL_VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["vllm"]
+    container_name: voxtral-vllm
+    hostname: voxtral-vllm
+    # Mistral-format models need these flags; see:
+    # https://docs.vllm.ai/en/latest/api/vllm/model_executor/models/voxtral/
+    # Using the YAML list form (not a folded string) so the JSON value of
+    # --compilation-config is passed as one argv element without shell
+    # interpretation of its braces / quotes.
+    command:
+      - "--model"
+      - "${VOXTRAL_VLLM_MODEL_ID:-mistralai/Voxtral-Mini-3B-2507}"
+      - "--tokenizer-mode"
+      - "mistral"
+      - "--config-format"
+      - "mistral"
+      - "--load-format"
+      - "mistral"
+      - "--trust-remote-code"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"PIECEWISE"}'
+      - "--tensor-parallel-size"
+      - "${VOXTRAL_VLLM_TP:-1}"
+      - "--max-model-len"
+      - "${VOXTRAL_VLLM_MAX_LEN:-45000}"
+      - "--max-num-batched-tokens"
+      - "${VOXTRAL_VLLM_MAX_BATCH:-8192}"
+      - "--max-num-seqs"
+      - "${VOXTRAL_VLLM_MAX_SEQS:-16}"
+      - "--gpu-memory-utilization"
+      - "${VOXTRAL_VLLM_GPU_MEM:-0.90}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      - VLLM_DISABLE_COMPILE_CACHE=1
+      - HF_HOME=/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Share the HF cache with the main VoxHub container to avoid downloading
+    # the ~8 GB Voxtral weights twice.
+    volumes:
+      - multi_hf_cache:/hf
+    shm_size: "4gb"
+    ipc: host
+    expose:
+      - "8000"
+    # Optional host port — uncomment to hit the vLLM server directly from
+    # the host (e.g. for curl debugging). The main VoxHub API does not need
+    # this; it reaches vLLM via the compose network.
+    # ports:
+    #   - "127.0.0.1:8001:8000"
+    healthcheck:
+      # vLLM exposes /health once the model is fully loaded.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
 
   # ─── VoxHub OpenAI-Compatible API ────────────────────────────
   voxhub-api:
@@ -91,6 +191,11 @@ services:
       - VOXHUB_VAD=hybrid
       - VOXHUB_DIARIZE=true
       - VOXHUB_DEVICE=auto
+      # Where to reach the vLLM server when voxtral:*-vllm models are
+      # selected. Defaults to the compose-internal hostname; override for
+      # external vLLM deployments.
+      - VOXTRAL_VLLM_URL=${VOXTRAL_VLLM_URL:-http://voxtral-vllm:8000/v1}
+      - VOXTRAL_VLLM_API_KEY=${VOXTRAL_VLLM_API_KEY:-EMPTY}
     entrypoint: ["python", "server.py"]
     networks:
       - default            # keeps intra-project links working
@@ -100,17 +205,19 @@ volumes:
   multi_hf_cache:
 
 networks:
+  # Default project network — implicit, but declared here so the YAML
+  # block is a valid mapping even if the external network below is
+  # disabled.
+  default:
+
   # Private network owned by the OpenHiNotes compose project. VoxHub joins
   # it as `external` so the OpenHiNotes backend can reach voxhub-api at
   # http://voxhub-api:8000 over a closed bridge — never via Caddy / LAN.
   #
   # The network must already exist when VoxHub starts. The OpenHiNotes
-  # compose stack creates it (declared without `external:` on its side); if
-  # OpenHiNotes is not running, create it manually:
-  #     docker network create hinotes-internal
-  #
-  # See README ("Cross-project networking") for the matching OpenHiNotes
-  # backend-side YAML block.
+  # compose stack creates it on `up`. If its actual docker network name
+  # includes a project prefix (e.g. `openhinotes_hinotes-internal`), set
+  # `name:` below to that value.
   hinotes-internal:
     external: true
-    name: hinotes-internal
+    # name: openhinotes_hinotes-internal

@@ -128,7 +128,7 @@ def main():
     # Model Selection
     parser.add_argument(
         "--model", 
-        default="voxtral:mini-4b", 
+        default="voxtral:mini-3b",
         help=f"Model specifier, comma-separated list, or 'all'. Supported: {', '.join(list_supported_models())}"
     )
     parser.add_argument("--lang", default=None, help="Language code (e.g., 'fr', 'en', 'es', 'de') for transcription.")
