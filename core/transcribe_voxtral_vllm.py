@@ -65,6 +65,21 @@ _TOKENS_PER_SECOND_BUDGET = float(
 )
 _MIN_MAX_TOKENS = int(os.environ.get("VOXTRAL_VLLM_MIN_MAX_TOKENS", "64"))
 
+# Per-segment HTTP timeout. vLLM 0.19.x silently drops max_tokens on the
+# /v1/audio/transcriptions endpoint, so the only reliable way to abort a
+# stuck/looping segment is at the HTTP layer. We compute a duration-aware
+# ceiling: max(MIN, duration_s * MULT). For a 15s segment with MULT=3 the
+# ceiling is 45s, well above the few seconds a clean segment actually
+# needs but well below the ~120s a stuck one would otherwise burn. On
+# timeout we drop the segment without retrying — retrying a stuck loop
+# just multiplies GPU time without changing the outcome.
+_SEGMENT_TIMEOUT_MULT = float(
+    os.environ.get("VOXTRAL_VLLM_SEGMENT_TIMEOUT_MULT", "3.0")
+)
+_SEGMENT_MIN_TIMEOUT = float(
+    os.environ.get("VOXTRAL_VLLM_SEGMENT_MIN_TIMEOUT", "15")
+)
+
 # Repetition guard. Voxtral's failure mode on noisy chunks is to loop on a
 # short n-gram ("merci. merci. merci…", "you. you. you…"). When the most
 # common 3-gram dominates the output above this fraction, we treat the
@@ -276,6 +291,11 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
         max_tokens = max(
             _MIN_MAX_TOKENS, int(duration_s * _TOKENS_PER_SECOND_BUDGET)
         )
+        # See _SEGMENT_TIMEOUT_MULT for why we override the client-wide
+        # default per call.
+        segment_timeout = max(
+            _SEGMENT_MIN_TIMEOUT, duration_s * _SEGMENT_TIMEOUT_MULT
+        )
 
         kwargs = {
             "file": file_tuple,
@@ -292,7 +312,7 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
             # multi-paragraph context risks exceeding it silently.
             kwargs["prompt"] = " ".join(context.split()[-30:])
 
-        text = self._post_with_retries(kwargs)
+        text = self._post_with_retries(kwargs, timeout=segment_timeout)
         text = text.strip()
 
         # Repetition guard. If Voxtral got stuck in a loop on this chunk,
@@ -322,20 +342,42 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
         return [self.transcribe_segment(seg) for seg in audio_segments]
 
     # ── Internal helpers ───────────────────────────────────────────────
-    def _post_with_retries(self, kwargs: dict) -> str:
+    def _post_with_retries(
+        self, kwargs: dict, *, timeout: Optional[float] = None
+    ) -> str:
         """POST the transcription request with simple exponential backoff.
+
+        On HTTP-level timeouts we DO NOT retry: a stuck / looping Voxtral
+        segment will time out the same way every time, and retrying just
+        burns more GPU time. We return "" instead, which api/transcriber.py
+        treats as "skip this segment" via its existing empty-text guard.
 
         We retry on connection errors and 5xx-shaped exceptions. 4xx errors
         (bad model id, malformed audio) are re-raised immediately since
         they won't be fixed by retrying.
         """
+        # Lazy import to avoid a hard dep on the openai package at module
+        # load time — the rest of the file already pays for it on first
+        # request via load(), so this is just for the exception class.
+        from openai import APITimeoutError
+
+        effective_timeout = timeout if timeout is not None else self.timeout
         last_err: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = self._client.audio.transcriptions.create(
-                    timeout=self.timeout, **kwargs
+                    timeout=effective_timeout, **kwargs
                 )
                 return self._extract_text(resp)
+            except APITimeoutError as e:
+                # Hard timeout → almost certainly a Voxtral hallucination loop.
+                # Drop the segment, do not retry, do not raise.
+                logger.warning(
+                    "vLLM transcription timed out after %.1fs — dropping segment "
+                    "(attempt %d). %s",
+                    effective_timeout, attempt, e,
+                )
+                return ""
             except Exception as e:
                 last_err = e
                 # Fail fast on client-side errors (wrong model, auth…):
