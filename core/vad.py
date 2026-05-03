@@ -398,6 +398,7 @@ class UnifiedVAD:
         self.silero_threshold = silero_threshold
         self.override_threshold = override_threshold
         self.vad_model = None
+        self._hybrid_fallback: Optional["HybridVAD"] = None
 
     def detect(self, audio: np.ndarray, sampling_rate: int = 16000, **kwargs) -> List[Dict]:
         """
@@ -411,6 +412,22 @@ class UnifiedVAD:
         on_progress: Optional[Callable] = kwargs.pop("on_progress", None)
 
         if self.mode == "silero":
+            if kwargs.get("diarize", False):
+                logger.warning(
+                    "VAD mode 'silero' does not support speaker diarization — "
+                    "automatically upgrading to 'hybrid' (Silero gate + pyannote) "
+                    "to fulfil diarize=True. Set vad_mode='hybrid' or 'pyannote' "
+                    "explicitly to silence this warning."
+                )
+                if self._hybrid_fallback is None:
+                    self._hybrid_fallback = HybridVAD(
+                        silero_threshold=self.silero_threshold,
+                        override_threshold=self.override_threshold,
+                        hf_token=self.hf_token,
+                    )
+                return self._hybrid_fallback.detect(
+                    audio, sampling_rate, on_progress=on_progress, **kwargs
+                )
             if not self.vad_model:
                 self.vad_model = SileroVAD()
             if on_progress:
