@@ -55,12 +55,37 @@ class ServerConfig(BaseSettings):
     result_ttl: int = Field(default=3600, description="Seconds to keep finished job results (0 = keep forever)")
 
     # Hybrid VAD tuning (only used when vad=hybrid)
-    silero_threshold: float = Field(default=0.35, description="Silero gate sensitivity for hybrid mode")
+    # Bumped 0.35 -> 0.5 as part of the anti-hallucination work: 0.35 was
+    # tuned for maximum recall (catch every utterance) but let through enough
+    # noise-classified-as-speech to consistently trigger LM-prior hallucinations
+    # in Voxtral on low-SNR chunks. 0.5 is Silero's documented "balanced"
+    # default. The override_threshold safety net (0.8) still rescues
+    # high-confidence Silero segments that Pyannote rejects.
+    silero_threshold: float = Field(default=0.5, description="Silero gate sensitivity for hybrid mode")
     override_threshold: float = Field(default=0.8, description="Silero confidence to override Pyannote rejection")
 
     # Segment post-processing
     min_turn_duration: float = Field(default=1.5, description="Speaker turns shorter than this are absorbed (seconds)")
     refine_boundaries: bool = Field(default=False, description="Use wav2vec2 to snap boundaries to exact speech onset/offset")
+
+    # Transcription-time segment filters. These run between VAD and the ASR
+    # backend and exist to keep low-information audio chunks from reaching
+    # the model — every backend we support (Whisper, Voxtral, …) hallucinates
+    # boilerplate ("I'm sorry, I can't help…", "Thanks for watching", …) when
+    # fed silence or near-silence, so we drop those segments up-front.
+    min_segment_duration: float = Field(
+        default=0.5,
+        description="Skip VAD segments shorter than this (seconds). "
+                    "Below ~0.5s, ASR models tend to fall back to LM priors "
+                    "and emit hallucinated boilerplate.",
+    )
+    min_segment_rms: float = Field(
+        default=0.005,
+        description="Skip segments whose audio RMS is below this threshold "
+                    "(float32 audio in [-1, 1]; 0.005 ≈ -46 dBFS). VAD says "
+                    "'speech yes/no'; this catches the residual silence/noise "
+                    "that VAD lets through. Set to 0 to disable.",
+    )
 
     # Transcription settings (from main.py)
     precision: str = "auto"

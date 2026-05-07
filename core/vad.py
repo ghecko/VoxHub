@@ -136,7 +136,7 @@ class HybridVAD:
 
     def __init__(
         self,
-        silero_threshold: float = 0.35,
+        silero_threshold: float = 0.5,
         override_threshold: float = 0.8,
         hf_token: Optional[str] = None,
     ):
@@ -392,7 +392,7 @@ class UnifiedVAD:
     See HybridVAD docstring for details on the Refined Gating strategy.
     """
     def __init__(self, mode: str = "silero", hf_token: Optional[str] = None,
-                 silero_threshold: float = 0.35, override_threshold: float = 0.8):
+                 silero_threshold: float = 0.5, override_threshold: float = 0.8):
         self.mode = mode
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.silero_threshold = silero_threshold
@@ -464,10 +464,48 @@ class UnifiedVAD:
             return self.vad_model.detect(audio, sampling_rate, on_progress=on_progress, **kwargs)
 
         elif self.mode == "none":
-            # Pass full audio as a single segment
-            duration = len(audio) / sampling_rate
+            # "none" used to pass the entire audio as a single segment to the
+            # ASR backend, which is the worst-case scenario for hallucinations:
+            # any silence/noise inside the file gives the LM-prior decoder
+            # (Voxtral-Mistral, Whisper-large-v3 RLHF tail) free reign to emit
+            # boilerplate ("I'm sorry, I can't help with that", …).
+            #
+            # We now run a permissive Silero pass as a minimum safety net even
+            # when "none" is requested. Silero is light (~50 MB, CPU-friendly)
+            # so the cost is negligible. A clear warning tells the user we're
+            # overriding their explicit choice — they can always tighten with
+            # mode="silero"/"hybrid" if they want fine control.
+            #
+            # Final fallback: if Silero finds zero speech (very short clip,
+            # extreme codec, …) we revert to the original full-audio segment
+            # so transcription still proceeds.
+            logger.warning(
+                "VAD mode='none' is unsafe for ASR backends — silence/noise "
+                "in the audio will trigger LM-prior hallucinations "
+                "(\"I'm sorry…\", \"Thanks for watching\", etc). Running a "
+                "permissive Silero pass as a safety net. Use mode='silero' or "
+                "'hybrid' explicitly to silence this warning."
+            )
+            if on_progress:
+                on_progress("vad", 0.05)
+            fallback_vad = SileroVAD(
+                threshold=0.5,
+                min_speech_duration_ms=200,
+                min_silence_duration_ms=500,
+            )
+            segments = fallback_vad.detect(audio, sampling_rate)
             if on_progress:
                 on_progress("vad", 1.0)
+            if segments:
+                return segments
+            # Silero returned nothing — fall back to single segment so we
+            # don't drop the entire file silently.
+            duration = len(audio) / sampling_rate
+            logger.warning(
+                "Silero safety-net pass found no speech in a %.1fs file; "
+                "falling back to a single full-audio segment.",
+                duration,
+            )
             return [{"start": 0.0, "end": duration}]
 
         else:
