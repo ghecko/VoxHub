@@ -417,10 +417,37 @@ class TranscriptionService:
                 end_samp = int(seg["end"] * sampling_rate)
                 duration = seg["end"] - seg["start"]
 
-                if duration < 0.2:  # Skip too short segments
+                # Drop segments shorter than the configured floor. Below
+                # ~0.5s the ASR backend has too little signal to override its
+                # language-prior fallback and tends to emit hallucinated
+                # boilerplate ("I'm sorry…", "Thanks for watching", …).
+                if duration < self.config.min_segment_duration:
+                    logger.debug(
+                        f"[{request_id}] Skipping short segment "
+                        f"[{seg['start']:.2f}-{seg['end']:.2f}s] "
+                        f"({duration*1000:.0f}ms < "
+                        f"{self.config.min_segment_duration*1000:.0f}ms)"
+                    )
                     continue
 
                 segment_audio = audio[start_samp:end_samp]
+
+                # Energy gate. VAD answers "is there speech somewhere in this
+                # window" — it doesn't answer "is the SNR high enough for ASR".
+                # A Pyannote-validated chunk can still contain mostly silence
+                # plus distant noise, which is exactly the failure mode that
+                # makes Voxtral/Whisper hallucinate. Compute RMS once and skip
+                # below threshold. Set min_segment_rms=0 in config to disable.
+                if self.config.min_segment_rms > 0 and segment_audio.size > 0:
+                    rms = float(np.sqrt(np.mean(segment_audio.astype(np.float32) ** 2)))
+                    if rms < self.config.min_segment_rms:
+                        logger.debug(
+                            f"[{request_id}] Skipping low-energy segment "
+                            f"[{seg['start']:.2f}-{seg['end']:.2f}s] "
+                            f"rms={rms:.4f} < {self.config.min_segment_rms}"
+                        )
+                        continue
+
                 speaker = seg.get("speaker", "SPEAKER_00")
 
                 # Handle context carry for models that support it

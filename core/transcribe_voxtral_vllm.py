@@ -297,11 +297,30 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
             _SEGMENT_MIN_TIMEOUT, duration_s * _SEGMENT_TIMEOUT_MULT
         )
 
+        # Decoding params chosen to suppress the LM-prior fallback that makes
+        # Voxtral emit "I'm sorry, I can't help with that" / "Could you please
+        # clarify…" boilerplate when the audio embedding is ambiguous (silence,
+        # noise, very short utterance). Voxtral's decoder is a Mistral instruct
+        # LLM, so on low-information audio it reverts to its RLHF prior unless
+        # we explicitly constrain decoding:
+        #   - temperature=0.0          deterministic decoding, no sampling drift
+        #   - repetition_penalty=1.1   gentle penalty against the looping mode
+        #                              that complements the post-hoc
+        #                              _looks_repetitive() guard below
+        # Tunable via env for unusual deployments.
+        _temperature = float(os.environ.get("VOXTRAL_VLLM_TEMPERATURE", "0.0"))
+        _repetition_penalty = float(
+            os.environ.get("VOXTRAL_VLLM_REPETITION_PENALTY", "1.1")
+        )
         kwargs = {
             "file": file_tuple,
             "model": self.model_id,
             "response_format": "json",
-            "extra_body": {"max_tokens": max_tokens},
+            "extra_body": {
+                "max_tokens": max_tokens,
+                "temperature": _temperature,
+                "repetition_penalty": _repetition_penalty,
+            },
         }
         # Only forward the language hint when we actually have one;
         # passing language="" or "auto" confuses some vLLM builds.
