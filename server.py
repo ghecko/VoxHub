@@ -23,6 +23,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"Default Model: {config.model}")
     logger.info(f"Default VAD  : {config.vad}")
     logger.info(f"Diarization  : {config.diarize}")
+    pipeline = config.pipeline.value if hasattr(config.pipeline, "value") else config.pipeline
+    logger.info(f"Pipeline     : {pipeline}" + (f" (aligner: {config.align_model}, loaded on first request)" if pipeline == "wordalign" else ""))
     
     # Check for HF Token
     if config.hf_token:
@@ -43,6 +45,15 @@ async def lifespan(app: FastAPI):
             "This is safe inside a Docker network. If VoxHub is exposed publicly, "
             "set VOXHUB_ALLOW_INSECURE_EMBEDDINGS=false to enforce HTTPS."
         )
+
+    # Optionally warm the CTC aligner at startup so the first wordalign job
+    # doesn't pay the MMS_FA download/load (~1.2 GB) inline.
+    if pipeline == "wordalign" and config.preload_aligner:
+        import asyncio
+        logger.info("Preloading forced aligner %s ...", config.align_model)
+        aligner = await asyncio.to_thread(service._get_aligner)
+        if aligner is None:
+            logger.error("Aligner preload failed; wordalign requests will fall back to the legacy pipeline")
 
     yield
     logger.info("Shutting down VoxHub API Server")

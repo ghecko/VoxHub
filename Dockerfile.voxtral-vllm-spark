@@ -1,0 +1,29 @@
+# Thin layer on top of a custom vLLM image (e.g. the GB10 / Spark build)
+# that adds what Voxtral's startup profiling needs and upstream images ship
+# but custom builds usually don't:
+#
+#   ImportError: `soundfile` is not installed. Please install it with
+#   `pip install mistral-common[soundfile]`
+#
+# Build once, then point VOXTRAL_VLLM_IMAGE at the result:
+#
+#   docker build -f Dockerfile.voxtral-vllm-spark \
+#       --build-arg BASE_IMAGE=<your vllm image:tag> \
+#       -t voxtral-vllm:spark .
+#   # .env
+#   VOXTRAL_VLLM_IMAGE=voxtral-vllm:spark
+#
+# The entrypoint of the base image is preserved (docker-compose.yaml passes
+# the `vllm serve` arguments as `command:`; if your base image's entrypoint
+# is a bare shell or python, uncomment the ENTRYPOINT line below).
+ARG BASE_IMAGE=vllm/vllm-openai:latest
+FROM ${BASE_IMAGE}
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && (pip install --no-cache-dir 'mistral-common[soundfile]' \
+        || pip install --no-cache-dir --break-system-packages 'mistral-common[soundfile]') \
+    && python -c "import soundfile; from mistral_common.audio import Audio; print('soundfile', soundfile.__version__, 'OK')"
+
+# ENTRYPOINT ["vllm", "serve"]

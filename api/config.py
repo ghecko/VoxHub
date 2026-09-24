@@ -124,6 +124,10 @@ class ServerConfig(BaseSettings):
     # another torchaudio bundle name, or a HF Wav2Vec2ForCTC id such as
     # "jonatasgrosman/wav2vec2-large-xlsr-53-french".
     align_model: str = Field(default="MMS_FA")
+    preload_aligner: bool = Field(
+        default=False,
+        description="Load the CTC aligner at server startup instead of on the first wordalign request",
+    )
 
     # wordalign: regrouping of labelled words into display segments
     segment_max_pause: float = Field(default=1.0, description="Silence (s) that starts a new segment")

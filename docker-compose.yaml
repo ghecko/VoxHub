@@ -187,7 +187,13 @@ services:
       - multi_hf_cache:/app/models
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      # torchaudio bundles (MMS_FA aligner, wav2vec2) download to TORCH_HOME,
+      # not HF_HOME: point it into the same persistent volume so the 1.2 GB
+      # aligner is not re-downloaded on every container recreate.
+      - TORCH_HOME=/app/models/torch
       - VOXHUB_MODEL=${VOXHUB_MODEL:-whisper:turbo}
+      - VOXHUB_PIPELINE=${VOXHUB_PIPELINE:-wordalign}
+      - VOXHUB_PRELOAD_ALIGNER=${VOXHUB_PRELOAD_ALIGNER:-false}
       - VOXHUB_VAD=hybrid
       - VOXHUB_DIARIZE=true
       - VOXHUB_DEVICE=auto

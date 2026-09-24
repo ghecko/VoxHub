@@ -418,6 +418,15 @@ class TranscriptionService:
             duration = len(audio) / 16000.0
             self._job_progress(job_id, self._PROG_LOADING[1])
 
+            # ── 1a. Fail fast on the ASR backend ──────────────────────
+            # For remote backends (vLLM) this is a cheap /models probe; for
+            # in-process models it loads the weights, which we need anyway.
+            # Doing it here means an unreachable vllm service is reported in
+            # ~1 s instead of after language detection, aligner load and
+            # chunking (~30-60 s on a cold start).
+            self._job_progress(job_id, self._PROG_LOADING[1], stage="loading_model")
+            await self.get_model(model_spec)
+
             # ── 1b. Language detection ────────────────────────────────
             lang_hint, detected_language = await self._detect_language(
                 audio, model_spec, language, request_id, job_id
