@@ -53,6 +53,34 @@ def _strip_diacritics(text: str) -> str:
     )
 
 
+def split_words(text: str) -> List[str]:
+    """Split a transcript into alignable words.
+
+    French typographic spacing ("c'est ça ?", "oui !", "bon :") makes
+    ``str.split`` emit punctuation-only tokens. Such a token has no acoustic
+    content: aligned on its own it inherits interpolated timing and can be
+    handed to the *next* speaker, so the "?" of one sentence opens the next
+    person's segment. Glue it to the previous word instead (or to the next
+    one when it opens the text) so it follows the word it belongs to.
+    """
+    out: List[str] = []
+    pending: List[str] = []
+    for tok in text.split():
+        if not any(ch.isalnum() for ch in tok):
+            if out:
+                out[-1] = f"{out[-1]} {tok}"
+            else:
+                pending.append(tok)
+            continue
+        if pending:
+            tok = " ".join(pending + [tok])
+            pending = []
+        out.append(tok)
+    if pending:  # punctuation only
+        out.append(" ".join(pending))
+    return out
+
+
 def normalize_word(word: str, vocab: Dict[str, int], lowercase: bool, ascii_only: bool) -> str:
     """Reduce a transcript word to the characters the CTC vocabulary knows.
 
@@ -210,7 +238,7 @@ class ForcedAligner:
         impossible (text longer than the audio can carry, empty emissions)
         the words are spread uniformly over the chunk and a warning logged.
         """
-        words = text.split()
+        words = split_words(text)
         if not words:
             return []
         duration = len(audio) / self.backend.sample_rate

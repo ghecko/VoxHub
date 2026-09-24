@@ -634,7 +634,7 @@ class TranscriptionService:
         speaker_hints: Dict[str, Any], warnings: List[str],
     ) -> List[Dict]:
         from core.chunking import build_chunks, split_chunk
-        from core.align import assign_word_speakers, words_to_segments, uniform_word_times
+        from core.align import assign_word_speakers, words_to_segments, uniform_word_times, split_words
 
         sampling_rate = 16000
         duration = len(audio) / sampling_rate
@@ -773,7 +773,7 @@ class TranscriptionService:
             if aligner is not None:
                 chunk_words = await asyncio.to_thread(aligner.align, audio[s:e], text, chunk["start"])
             else:
-                chunk_words = uniform_word_times(text.split(), chunk["start"], chunk["end"])
+                chunk_words = uniform_word_times(split_words(text), chunk["start"], chunk["end"])
             words.extend(chunk_words)
             self._job_progress(job_id, self._lerp(self._PROG_WA_ALIGN, 0.9 * (i + 1) / n_chunks))
         words.sort(key=lambda w: w["start"])

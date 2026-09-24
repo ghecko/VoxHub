@@ -8,6 +8,7 @@ from core.align import (  # noqa: E402
     _merge_alignment,
     assign_word_speakers,
     normalize_word,
+    split_words,
     uniform_word_times,
     words_to_segments,
 )
@@ -122,3 +123,16 @@ def test_words_to_segments_breaks_on_speaker_pause_and_duration():
     soft[16]["word"] = "fin."
     segs = words_to_segments(soft, max_pause=1.0, max_duration=30.0, soft_duration=15.0)
     assert len(segs) == 2 and segs[0]["words"][-1]["word"] == "fin."
+
+
+def test_split_words_glues_french_punctuation_to_previous_word():
+    # "c'est ça ?" must not yield a standalone "?" that could drift to the
+    # next speaker's segment once interpolated.
+    assert split_words("Tu as pris deux semaines, c'est ça ? Trois semaines même !") == [
+        "Tu", "as", "pris", "deux", "semaines,", "c'est", "ça ?", "Trois", "semaines", "même !",
+    ]
+    assert split_words("... Oui") == ["... Oui"]
+    assert split_words("?") == ["?"]
+    assert split_words("") == []
+    # normalize_word still sees only the letters
+    assert normalize_word("ça ?", ASCII_VOCAB, True, True) == "ca"
