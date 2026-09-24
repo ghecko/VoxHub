@@ -194,6 +194,10 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
         # orchestration layer in api/transcriber.py passes context through.
         self.supports_context_carry = True
 
+        # Tells the orchestrator this backend is an HTTP client: several
+        # chunks can be in flight at once and vLLM will batch them.
+        self.is_remote = True
+
         # Lazy-created OpenAI client
         self._client = None
 

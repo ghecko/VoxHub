@@ -12,6 +12,9 @@ accelerate
 peft  # Required by ibm-granite/granite-4.0-1b-speech (bundled LoRA adapter)
 fastsafetensors>=0.1.10
 silero-vad
+# torchaudio ships with torch in every image; the wordalign pipeline uses
+# torchaudio.pipelines.MMS_FA for CTC forced alignment (word timestamps).
+torchaudio
 # Whisper now uses transformers (no faster-whisper / CTranslate2 needed)
 torchao
 bitsandbytes

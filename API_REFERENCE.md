@@ -40,9 +40,14 @@ Transcribe an audio file. OpenAI-compatible — any client that works with the O
 | `prompt` | string | no | `null` | Optional text to guide the model's style or vocabulary. Works like OpenAI's `prompt` parameter. |
 | `response_format` | string | no | `json` | Output format. One of: `json`, `verbose_json`, `text`, `srt`, `vtt`, `vtt_json`. See [Response Formats](#response-formats). |
 | `temperature` | float | no | `0.0` | Sampling temperature (0.0–1.0). Higher values produce more varied output. |
-| `timestamp_granularities[]` | string[] | no | `["segment"]` | Timestamp detail level. Values: `segment`, `word`. Pass multiple times for both. |
+| `timestamp_granularities[]` | string[] | no | `["segment"]` | Timestamp detail level. Values: `segment`, `word`. With `word`, `verbose_json` carries a `words` array per segment (and a flat top-level `words`). Word timestamps are produced by the `wordalign` pipeline only. |
 | `diarize` | bool | no | Server default (`true`) | Enable/disable speaker diarization for this request. |
-| `vad_mode` | string | no | Server default (`hybrid`) | VAD strategy for this request. One of: `silero`, `pyannote`, `hybrid`, `none`. See [VAD Modes](#vad-modes). |
+| `vad_mode` | string | no | Server default (`hybrid`) | **Legacy pipeline only.** VAD strategy: `silero`, `pyannote`, `hybrid`, `none`. See [VAD Modes](#vad-modes). With `diarize=true` and `vad_mode=silero` every segment is `SPEAKER_00` and a `warnings` entry is returned. |
+| `pipeline` | string | no | Server default (`wordalign`) | `wordalign` (transcribe silence-bounded chunks, diarize in parallel, CTC-align words, attach a speaker per word) or `legacy` (diarize first, transcribe each speaker turn). See [Pipelines](#pipelines). |
+| `num_speakers` | int | no | — | Exact number of speakers (pyannote hint). Mutually exclusive with `min_speakers`/`max_speakers`. |
+| `min_speakers` | int | no | — | Lower bound on the number of speakers. |
+| `max_speakers` | int | no | — | Upper bound on the number of speakers. |
+| `return_speaker_embeddings` | string | no | `"false"` | `"true"` adds a per-speaker 512-d voice embedding (`speaker_embeddings`) plus `speaker_embedding_model` to JSON responses. Requires `diarize=true`. |
 
 #### Example
 
@@ -80,6 +85,11 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
       "end": 2.4,
       "text": "Hello, welcome to the meeting.",
       "speaker": "SPEAKER_00",
+      "confidence": 0.91,
+      "words": [
+        {"word": "Hello,", "start": 0.02, "end": 0.41, "speaker": "SPEAKER_00", "score": 0.97},
+        {"word": "welcome", "start": 0.48, "end": 0.90, "speaker": "SPEAKER_00", "score": 0.95}
+      ],
       "avg_logprob": 0.0,
       "compression_ratio": 0.0,
       "no_speech_prob": 0.0
@@ -90,15 +100,18 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
       "end": 4.8,
       "text": "Let's begin.",
       "speaker": "SPEAKER_01",
+      "confidence": 0.88,
       "avg_logprob": 0.0,
       "compression_ratio": 0.0,
       "no_speech_prob": 0.0
     }
-  ]
+  ],
+  "pipeline": "wordalign",
+  "warnings": []
 }
 ```
 
-> **Note:** The `speaker` field is a VoxHub extension not present in the OpenAI API. Fields like `avg_logprob`, `compression_ratio`, and `no_speech_prob` are included for OpenAI compatibility but currently return `0.0`.
+> **Note:** `speaker`, `confidence`, `words`, `pipeline` and `warnings` are VoxHub extensions not present in the OpenAI API. `language` is the code detected by the language probe (or the one you passed), `duration` is the real audio duration. `confidence` (0-1) is the mean CTC alignment score of the segment's words and is only present on the `wordalign` pipeline; `words` only when `timestamp_granularities[]=word` was requested. `avg_logprob`, `compression_ratio` and `no_speech_prob` are kept for OpenAI compatibility and return `0.0`.
 
 #### Response (`text`)
 
@@ -183,7 +196,10 @@ Same as `/v1/audio/transcriptions`, except `temperature` and `timestamp_granular
 | `prompt` | string | no | `null` | Style/vocabulary hint |
 | `response_format` | string | no | `json` | Output format for the eventual result |
 | `diarize` | bool | no | Server default | Enable/disable diarization |
-| `vad_mode` | string | no | Server default | VAD strategy: `silero`, `pyannote`, `hybrid`, `none` |
+| `vad_mode` | string | no | Server default | VAD strategy (legacy pipeline): `silero`, `pyannote`, `hybrid`, `none` |
+| `pipeline` | string | no | Server default | `wordalign` or `legacy` |
+| `num_speakers` / `min_speakers` / `max_speakers` | int | no | — | pyannote speaker-count hints (exact count *or* range) |
+| `return_speaker_embeddings` | string | no | `"false"` | `"true"` to compute per-speaker voice embeddings |
 
 #### Example
 
@@ -284,19 +300,22 @@ Poll the status of an async transcription job.
 
 ```json
 {
-  "job_id": "a1b2c3d4-...",
+  "id": "a1b2c3d4-...",
   "status": "processing",
   "stage": "transcribing",
-  "progress": 65
+  "progress": 42.5,
+  "chunks_done": 7,
+  "chunks_total": 12
 }
 ```
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `job_id` | string | The job identifier |
+| `id` | string | The job identifier |
 | `status` | string | One of: `pending`, `processing`, `completed`, `failed`, `cancelled` |
-| `stage` | string or null | Current pipeline stage: `loading`, `vad`, `transcribing`, or `null` when done |
-| `progress` | int | Percentage complete (0–100) |
+| `stage` | string or null | Current pipeline stage: `loading`, `detecting_language`, `vad`, `diarizing`, `transcribing`, `aligning`, `embeddings`, or `null` when done |
+| `progress` | float | Percentage complete (0–100). Moves at least every ~5 s while a long step (pyannote) runs, so pollers can use "no change for N seconds" as a staleness signal. |
+| `chunks_done` / `chunks_total` | int or null | `wordalign` pipeline only: transcription sub-progress. `chunks_total` can grow when a chunk is re-split after a dropped output. |
 
 ---
 
@@ -309,6 +328,7 @@ Retrieve the result of a completed job. Returns `400` if the job is not yet comp
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
 | `response_format` | string | `json` | Output format (same options as the transcription endpoint) |
+| `words` | bool | `false` | Add per-word timestamps and speakers to `verbose_json` (same as `timestamp_granularities[]=word` on the sync endpoint) |
 
 #### Response
 
@@ -481,6 +501,15 @@ The `vad_mode` parameter controls how audio is segmented before transcription:
 
 > **Note:** `pyannote` and `hybrid` modes require a valid `HF_TOKEN` environment variable (Hugging Face access token with permission for Pyannote models).
 
+### Pipelines
+
+| Value | How it works | Trade-offs |
+|:------|:-------------|:-----------|
+| `wordalign` (default) | 1. Silero finds silences and the audio is cut into speaker-agnostic chunks (~60 s, max 180 s). 2. The chunks are transcribed with full context (concurrently on vLLM backends) while pyannote diarizes the whole file in parallel. 3. Each chunk's text is force-aligned to its audio with a CTC model (`VOXHUB_ALIGN_MODEL`, default `MMS_FA`) to get word timestamps. 4. Every word takes the speaker of the turn it overlaps most; words are regrouped into segments on speaker change or pauses > 1 s. | Best ASR quality (context), per-word speakers, overlaps resolved word by word, word timestamps and confidence in the output. Needs the aligner model (~1.2 GB for MMS_FA). Word boundaries are as good as the CTC model (~50-100 ms). |
+| `legacy` | pyannote (or Silero/hybrid) segments the audio into speaker turns first; each turn is transcribed on its own, then merged. | No extra model. Short turns (< 0.5 s) are dropped, interjections are absorbed into the surrounding turn, overlapping speech is trimmed, and each turn is transcribed without context. |
+
+When the aligner cannot be loaded the server falls back to `legacy` and says so in `warnings`.
+
 ### Response Formats
 
 | Value | Content-Type | Description |
@@ -520,4 +549,4 @@ All errors return JSON:
 
 | Status | Meaning |
 |:-------|:--------|
-| `400` | Job not yet 
+| `400` | Job not yet 

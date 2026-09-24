@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 # Singleton model holder — loaded once at first use
 # ---------------------------------------------------------------------------
 
+# Identity of the embedding space. Consumers (OpenHiNotes) persist these
+# vectors as voice profiles; changing the model silently invalidates every
+# enrolled profile, so the id/dim are reported in API responses and must be
+# checked client-side before matching.
+EMBEDDING_MODEL_ID = "pyannote/embedding"
+EMBEDDING_DIM = 512
+
 _embedding_model = None
 _embedding_model_lock = None  # Set at first call (needs event loop context)
 
@@ -33,8 +40,8 @@ def _get_embedding_model(hf_token: Optional[str] = None):
         from pyannote.audio import Model
 
         token = hf_token or os.getenv("HF_TOKEN")
-        logger.info("Loading speaker embedding model: pyannote/embedding")
-        _embedding_model = Model.from_pretrained("pyannote/embedding", token=token)
+        logger.info("Loading speaker embedding model: %s", EMBEDDING_MODEL_ID)
+        _embedding_model = Model.from_pretrained(EMBEDDING_MODEL_ID, token=token)
 
         # Move to best available device
         if torch.cuda.is_available():

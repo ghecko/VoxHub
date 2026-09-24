@@ -23,6 +23,21 @@ class VadMode(str, Enum):
     HYBRID = "hybrid"
     NONE = "none"
 
+
+class PipelineMode(str, Enum):
+    """How transcription and diarization are combined.
+
+    legacy    — diarize first, then transcribe each speaker turn in isolation
+                (original VoxHub behaviour; speaker labels are exact but the
+                ASR model sees short, context-free chunks).
+    wordalign — WhisperX-style: transcribe silence-bounded chunks with full
+                context, run pyannote in parallel, force-align words with a
+                CTC model, then attach a speaker to every word. Produces
+                word timestamps and per-segment confidence.
+    """
+    LEGACY = "legacy"
+    WORDALIGN = "wordalign"
+
 class ServerConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VOXHUB_",
@@ -85,6 +100,37 @@ class ServerConfig(BaseSettings):
                     "(float32 audio in [-1, 1]; 0.005 ≈ -46 dBFS). VAD says "
                     "'speech yes/no'; this catches the residual silence/noise "
                     "that VAD lets through. Set to 0 to disable.",
+    )
+
+    # ── Pipeline selection ─────────────────────────────────────────────
+    pipeline: PipelineMode = Field(
+        default=PipelineMode.WORDALIGN,
+        description="legacy (diarize → transcribe turns) or wordalign "
+                    "(transcribe chunks ∥ diarize → CTC align → per-word speakers)",
+    )
+
+    # wordalign: acoustic chunking (silence-bounded, speaker-agnostic)
+    chunk_target_duration: float = Field(default=60.0, description="Preferred chunk length (s)")
+    chunk_max_duration: float = Field(default=180.0, description="Hard ceiling on chunk length (s)")
+    chunk_min_duration: float = Field(default=8.0, description="Never cut a chunk shorter than this (s)")
+    chunk_silero_threshold: float = Field(default=0.4, description="Silero threshold used for chunk boundaries")
+
+    # wordalign: how many chunks are sent to the ASR backend concurrently.
+    # Only remote backends (voxtral:*-vllm) benefit — vLLM batches concurrent
+    # requests. In-process transformers backends are forced to 1.
+    transcribe_concurrency: int = Field(default=4, ge=1)
+
+    # wordalign: CTC aligner. "MMS_FA" (multilingual torchaudio bundle),
+    # another torchaudio bundle name, or a HF Wav2Vec2ForCTC id such as
+    # "jonatasgrosman/wav2vec2-large-xlsr-53-french".
+    align_model: str = Field(default="MMS_FA")
+
+    # wordalign: regrouping of labelled words into display segments
+    segment_max_pause: float = Field(default=1.0, description="Silence (s) that starts a new segment")
+    segment_max_duration: float = Field(default=30.0, description="Hard ceiling on a display segment (s)")
+    word_speaker_max_gap: float = Field(
+        default=1.0,
+        description="A word with no overlapping speaker turn takes the nearest turn if within this many seconds",
     )
 
     # Transcription settings (from main.py)
