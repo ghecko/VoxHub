@@ -161,6 +161,7 @@ class TranscriptionService:
             "chunks_done": None,    # wordalign only: transcription sub-progress
             "chunks_total": None,
             "created_at": time.time(),
+            "updated_at": time.time(),   # bumped on every status change and by heartbeats (liveness signal for pollers)
             "completed_at": None,
             "result": None,
             "error": None,
@@ -201,7 +202,29 @@ class TranscriptionService:
 
     def _update_job(self, job_id: str, **kwargs):
         if job_id in self._jobs:
+            kwargs.setdefault("updated_at", time.time())
             self._jobs[job_id].update(kwargs)
+
+    async def _await_with_heartbeat(self, future: "asyncio.Future", job_id: Optional[str],
+                                    stage: str, ceiling: float,
+                                    interval: float = 5.0, bump: float = 0.1):
+        """Await *future* while keeping the job visibly alive.
+
+        Long CPU/GPU phases (Silero over a whole file, pyannote) report no
+        internal progress, so polling consumers such as OpenHiNotes would see a
+        frozen job and kill it as stale (5 min there). Every *interval* seconds
+        this touches ``updated_at`` and nudges ``progress`` by *bump* up to
+        *ceiling* — enough to prove liveness without lying about real progress.
+        """
+        while not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            if not future.done() and job_id:
+                cur = self._jobs.get(job_id, {}).get("progress", 0)
+                self._job_progress(job_id, min(cur + bump, ceiling), stage=stage)
+        return future.result()
 
     # ── Pipeline progress ranges ────────────────────────────────────
     # Each pipeline phase occupies a fixed slice of the 0–100 progress
@@ -345,24 +368,12 @@ class TranscriptionService:
 
         # The pyannote community pipeline doesn't report internal step
         # progress, so the bar would otherwise freeze for the entire
-        # diarization. Bump progress by +0.1 every few seconds — just enough
-        # to reset the stale-job timer in OpenHiNotes without lying about
-        # real progress.
-        _HEARTBEAT_INTERVAL = 5
-        _HEARTBEAT_BUMP = 0.1
-        ceiling = prog_range[1] - 1
-        while not vad_future.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(vad_future), timeout=_HEARTBEAT_INTERVAL)
-            except asyncio.TimeoutError:
-                pass
-            if not vad_future.done() and job_id:
-                cur = self._jobs.get(job_id, {}).get("progress", 0)
-                self._job_progress(
-                    job_id, min(cur + _HEARTBEAT_BUMP, ceiling),
-                    stage="diarizing" if diarize else "vad",
-                )
-        return vad_future.result()
+        # diarization: keep the job alive with the shared heartbeat.
+        return await self._await_with_heartbeat(
+            vad_future, job_id,
+            stage="diarizing" if diarize else "vad",
+            ceiling=prog_range[1] - 1,
+        )
 
     # ------------------------------------------------------------------
     # Entry point
@@ -642,7 +653,19 @@ class TranscriptionService:
         # ── 2. Silence-bounded chunking (Silero, CPU, fast) ───────────
         self._check_cancelled(job_id, "before chunking")
         self._job_progress(job_id, self._PROG_WA_CHUNK[0], stage="vad")
-        speech = await asyncio.to_thread(self._get_chunk_vad().detect, audio, sampling_rate)
+        # Silero walks the whole file in 32 ms windows from Python: on a long
+        # recording this is minutes of CPU with no intermediate progress, so
+        # the poller must see a heartbeat or it declares the job stale.
+        t_vad = time.monotonic()
+        chunk_vad = self._get_chunk_vad()
+        speech = await self._await_with_heartbeat(
+            asyncio.ensure_future(asyncio.to_thread(chunk_vad.detect, audio, sampling_rate)),
+            job_id, stage="vad", ceiling=self._PROG_WA_CHUNK[1] - 0.5,
+        )
+        logger.info(
+            f"[{request_id}] Silero chunking VAD: {len(speech)} speech regions "
+            f"in {time.monotonic() - t_vad:.1f}s for {duration:.0f}s of audio"
+        )
         chunks = build_chunks(
             speech, duration,
             target_duration=self.config.chunk_target_duration,
