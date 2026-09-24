@@ -20,10 +20,13 @@ ARG BASE_IMAGE=vllm/vllm-openai:latest
 FROM ${BASE_IMAGE}
 
 USER root
+# Install into the SAME interpreter that runs vLLM (`python3 -m pip`, not a
+# bare `pip` that may belong to another Python), then prove it by importing
+# soundfile from the interpreter that can import vllm.
 RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
     && rm -rf /var/lib/apt/lists/* \
-    && (pip install --no-cache-dir 'mistral-common[soundfile]' \
-        || pip install --no-cache-dir --break-system-packages 'mistral-common[soundfile]') \
-    && python -c "import soundfile; from mistral_common.audio import Audio; print('soundfile', soundfile.__version__, 'OK')"
+    && (python3 -m pip install --no-cache-dir 'mistral-common[soundfile]' \
+        || python3 -m pip install --no-cache-dir --break-system-packages 'mistral-common[soundfile]') \
+    && python3 -c "import vllm, soundfile; from mistral_common.audio import Audio; print('vllm', vllm.__version__, '| soundfile', soundfile.__version__, 'OK')"
 
 # ENTRYPOINT ["vllm", "serve"]
