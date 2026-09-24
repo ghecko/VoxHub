@@ -409,10 +409,10 @@ python test_jobs.py audio/your_audio_file.mp3
 | `VOXTRAL_VLLM_IMAGE` | `vllm/vllm-openai:latest` | Docker image for the `voxtral-vllm` service. Override when upstream doesn't support your GPU (e.g. Blackwell / GB10 — see "Using a custom vLLM image") |
 | `VOXTRAL_VLLM_MODEL_ID` | `mistralai/Voxtral-Mini-3B-2507` | HF model id the `voxtral-vllm` container serves |
 | `VOXTRAL_VLLM_TP` | `1` | `--tensor-parallel-size` passed to vLLM |
-| `VOXTRAL_VLLM_MAX_LEN` | `45000` | `--max-model-len` passed to vLLM |
+| `VOXTRAL_VLLM_MAX_LEN` | `32768` | `--max-model-len` passed to vLLM. Voxtral Mini is a 32k model (`max_position_embeddings=32768`); vLLM refuses higher values. 16384 is plenty for the wordalign pipeline (chunks <= 180 s) and frees KV-cache memory. |
 | `VOXTRAL_VLLM_MAX_BATCH` | `8192` | `--max-num-batched-tokens` passed to vLLM |
 | `VOXTRAL_VLLM_MAX_SEQS` | `16` | `--max-num-seqs` passed to vLLM |
-| `VOXTRAL_VLLM_GPU_MEM` | `0.90` | `--gpu-memory-utilization` passed to vLLM |
+| `VOXTRAL_VLLM_GPU_MEM` | `0.90` | `--gpu-memory-utilization` passed to vLLM. **DGX Spark / GB10:** the unified memory is reported as GPU memory, so use an absolute budget such as `0.12` (~15 GiB); 0.90 fails at startup with `Free memory ... is less than desired GPU memory utilization`. |
 
 > **Tip — Language Detection**: Whisper models auto-detect the spoken language by default. If you're getting translated output (e.g., English text for French audio), set the `language` parameter explicitly in your request.
 

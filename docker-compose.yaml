@@ -112,11 +112,15 @@ services:
       - "--tensor-parallel-size"
       - "${VOXTRAL_VLLM_TP:-1}"
       - "--max-model-len"
-      - "${VOXTRAL_VLLM_MAX_LEN:-45000}"
+      - "${VOXTRAL_VLLM_MAX_LEN:-32768}"
       - "--max-num-batched-tokens"
       - "${VOXTRAL_VLLM_MAX_BATCH:-8192}"
       - "--max-num-seqs"
       - "${VOXTRAL_VLLM_MAX_SEQS:-16}"
+      # 0.90 is right for a discrete GPU. On unified-memory boxes (DGX Spark /
+      # GB10: the whole 128 GB shows up as "GPU memory") it must be an absolute
+      # budget expressed as a fraction: 0.12 (~15 GiB) is plenty for Voxtral
+      # Mini FP8 + KV cache and leaves room for VoxHub, pyannote and the aligner.
       - "--gpu-memory-utilization"
       - "${VOXTRAL_VLLM_GPU_MEM:-0.90}"
       - "--host"
