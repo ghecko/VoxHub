@@ -1,0 +1,37 @@
+# Thin layer on top of a custom vLLM image (e.g. the GB10 / Spark build)
+# that adds what Voxtral's startup profiling needs and upstream images ship
+# but custom builds usually don't:
+#
+#   ImportError: `soundfile` is not installed. Please install it with
+#   `pip install mistral-common[soundfile]`
+#
+# Build once, then point VOXTRAL_VLLM_IMAGE at the result:
+#
+#   docker build -f Dockerfile.voxtral-vllm-spark \
+#       --build-arg BASE_IMAGE=<your vllm image:tag> \
+#       -t voxtral-vllm:spark .
+#   # .env
+#   VOXTRAL_VLLM_IMAGE=voxtral-vllm:spark
+#
+# The entrypoint is pinned to `vllm serve` (see bottom): docker-compose.yaml
+# passes the server arguments as `command:`.
+ARG BASE_IMAGE=vllm/vllm-openai:latest
+FROM ${BASE_IMAGE}
+
+USER root
+# Install into the SAME interpreter that runs vLLM (`python3 -m pip`, not a
+# bare `pip` that may belong to another Python), then prove it by importing
+# soundfile from the interpreter that can import vllm.
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && (python3 -m pip install --no-cache-dir 'mistral-common[soundfile]' \
+        || python3 -m pip install --no-cache-dir --break-system-packages 'mistral-common[soundfile]') \
+    && python3 -c "import vllm, soundfile; from mistral_common.audio import Audio; print('vllm', vllm.__version__, '| soundfile', soundfile.__version__, 'OK')"
+
+# docker-compose.yaml passes the `vllm serve` arguments (--model, --port,
+# ...) as `command:`. The NGC base entrypoint (/opt/nvidia/nvidia_entrypoint.sh)
+# just does `exec "$@"`, so without an explicit `vllm serve` prefix the first
+# argument is `--model` and bash fails with `exec: --: invalid option`. Pin
+# the entrypoint here so the compose args always land on `vllm serve`.
+ENTRYPOINT ["vllm", "serve"]
+CMD []

@@ -13,6 +13,8 @@ class BaseTranscriber(ABC):
         self.device = device
         self.language = language
         self.supports_context_carry = False
+        # True for HTTP-client backends (vLLM): chunks may be transcribed concurrently.
+        self.is_remote = False
 
     @abstractmethod
     def load(self) -> None:

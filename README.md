@@ -262,7 +262,43 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 
 ---
 
-## VAD & Diarization
+## Pipelines
+
+VoxHub has two ways of combining transcription and diarization, selected
+with `VOXHUB_PIPELINE` or per request with `pipeline=`:
+
+```mermaid
+graph LR
+    A[Audio] --> S[Silero silences]
+    S --> C[Chunks ~60 s<br/>speaker-agnostic]
+    C --> T[ASR backend<br/>full context, concurrent on vLLM]
+    A --> P[pyannote diarization<br/>whole file, in parallel]
+    T --> AL[CTC forced alignment<br/>MMS_FA → word timestamps]
+    AL --> R[Reconcile:<br/>word → overlapping speaker turn]
+    P --> R
+    R --> G[Regroup into segments<br/>speaker change / pause > 1 s]
+```
+
+**`wordalign` (default)** is the WhisperX-style flow above. The ASR model
+sees long, silence-bounded chunks (so a 300 ms "oui" is transcribed with the
+sentence around it instead of alone), diarization runs concurrently on the
+full file, and speakers are attached *per word* by projecting each aligned
+word onto the pyannote turns. Overlapping speech is resolved word by word
+instead of being trimmed, short interjections survive with the right label,
+and the output carries word timestamps (`timestamp_granularities[]=word`)
+and a per-segment `confidence`. When a chunk comes back empty (dropped
+repetition loop, vLLM timeout) it is retried on its two halves rather than
+lost.
+
+**`legacy`** is the original flow: VAD/diarization first, then each speaker
+turn is transcribed on its own. It needs no aligner model and remains
+available for A/B benchmarks (see `bench/`). Its VAD strategies are below.
+
+Speaker-count hints (`num_speakers`, or `min_speakers`/`max_speakers`) are
+forwarded to pyannote in both pipelines and are the single most effective
+lever against over-segmentation of one speaker into two labels.
+
+## VAD & Diarization (legacy pipeline)
 
 VoxHub supports four VAD strategies, selectable per request or via config:
 
@@ -351,7 +387,13 @@ python test_jobs.py audio/your_audio_file.mp3
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `VOXHUB_MODEL` | `whisper:turbo` | Default transcription model |
-| `VOXHUB_VAD` | `pyannote` | VAD mode: `silero`, `pyannote`, `hybrid`, `none` |
+| `VOXHUB_PIPELINE` | `wordalign` | `wordalign` (chunks ∥ diarize → align → per-word speakers) or `legacy` (diarize → transcribe turns) |
+| `VOXHUB_ALIGN_MODEL` | `MMS_FA` | CTC aligner for `wordalign`: a `torchaudio.pipelines` bundle name or a HF `Wav2Vec2ForCTC` id |
+| `VOXHUB_CHUNK_TARGET_DURATION` | `60` | Preferred chunk length in seconds (`wordalign`) |
+| `VOXHUB_CHUNK_MAX_DURATION` | `180` | Hard ceiling on chunk length (`wordalign`) |
+| `VOXHUB_TRANSCRIBE_CONCURRENCY` | `4` | Concurrent chunk requests to a remote vLLM backend (`wordalign`) |
+| `VOXHUB_SEGMENT_MAX_PAUSE` | `1.0` | Silence (s) that starts a new display segment (`wordalign`) |
+| `VOXHUB_VAD` | `hybrid` | VAD mode (legacy pipeline): `silero`, `pyannote`, `hybrid`, `none` |
 | `VOXHUB_DIARIZE` | `true` | Enable speaker diarization |
 | `VOXHUB_SILERO_THRESHOLD` | `0.35` | Silero gate sensitivity (hybrid mode) |
 | `VOXHUB_OVERRIDE_THRESHOLD` | `0.8` | Confidence override cutoff (hybrid mode) |
@@ -367,10 +409,10 @@ python test_jobs.py audio/your_audio_file.mp3
 | `VOXTRAL_VLLM_IMAGE` | `vllm/vllm-openai:latest` | Docker image for the `voxtral-vllm` service. Override when upstream doesn't support your GPU (e.g. Blackwell / GB10 — see "Using a custom vLLM image") |
 | `VOXTRAL_VLLM_MODEL_ID` | `mistralai/Voxtral-Mini-3B-2507` | HF model id the `voxtral-vllm` container serves |
 | `VOXTRAL_VLLM_TP` | `1` | `--tensor-parallel-size` passed to vLLM |
-| `VOXTRAL_VLLM_MAX_LEN` | `45000` | `--max-model-len` passed to vLLM |
+| `VOXTRAL_VLLM_MAX_LEN` | `32768` | `--max-model-len` passed to vLLM. Voxtral Mini is a 32k model (`max_position_embeddings=32768`); vLLM refuses higher values. 16384 is plenty for the wordalign pipeline (chunks <= 180 s) and frees KV-cache memory. |
 | `VOXTRAL_VLLM_MAX_BATCH` | `8192` | `--max-num-batched-tokens` passed to vLLM |
 | `VOXTRAL_VLLM_MAX_SEQS` | `16` | `--max-num-seqs` passed to vLLM |
-| `VOXTRAL_VLLM_GPU_MEM` | `0.90` | `--gpu-memory-utilization` passed to vLLM |
+| `VOXTRAL_VLLM_GPU_MEM` | `0.90` | `--gpu-memory-utilization` passed to vLLM. **DGX Spark / GB10:** the unified memory is reported as GPU memory, so use an absolute budget such as `0.12` (~15 GiB); 0.90 fails at startup with `Free memory ... is less than desired GPU memory utilization`. |
 
 > **Tip — Language Detection**: Whisper models auto-detect the spoken language by default. If you're getting translated output (e.g., English text for French audio), set the `language` parameter explicitly in your request.
 
@@ -460,5 +502,18 @@ api/                  FastAPI server, routers, formatters
   config.py           Server configuration (Pydantic Settings)
   transcriber.py      Async transcription service with job management
 core/
+  chunking.py         Silence-bounded acoustic chunking (wordalign pipeline)
+  align.py            CTC forced alignment, word → speaker assignment, regrouping (wordalign)
   vad.py              Unified VAD orchestrator (Silero, Pyannote, Hybrid)
-  segments.py         Segment post-processor (sanitizer + wav2vec2 bounda
+  diarize.py          pyannote diarization wrapper
+  segments.py         Segment post-processor (sanitizer + wav2vec2 boundary refiner, legacy)
+  embeddings.py       Per-speaker voice embeddings (pyannote/embedding)
+  lang_detect.py      Whisper-based language probe
+  registry.py         models.yaml loader / transcriber factory
+  transcribe*.py      ASR backends (Voxtral, Voxtral-vLLM, Whisper, Granite, Moonshine, Canary)
+bench/                cpWER / DER benchmark harness (legacy vs wordalign vs any backend)
+tests/                Unit tests for the pure-Python pipeline pieces (pytest)
+main.py               CLI entry point
+server.py             API entry point
+models.yaml           Model registry
+```

@@ -6,7 +6,7 @@ import logging
 from typing import Annotated, Literal, List, Optional
 from fastapi import APIRouter, Depends, Form, UploadFile, Request, HTTPException, status, BackgroundTasks
 from fastapi.responses import Response
-from api.config import get_config, ServerConfig, ResponseFormat, VadMode
+from api.config import get_config, ServerConfig, ResponseFormat, VadMode, PipelineMode
 from api.middleware import ApiKeyDependency
 from api.transcriber import get_transcription_service, TranscriptionService
 from api.formatters import format_transcription
@@ -14,6 +14,20 @@ from api.routers.embeddings import is_secure
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _validate_speaker_hints(num: Optional[int], lo: Optional[int], hi: Optional[int]) -> None:
+    """pyannote accepts either an exact count or a [min, max] range, not both."""
+    if num is not None and (lo is not None or hi is not None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Pass either num_speakers or min_speakers/max_speakers, not both",
+        )
+    if lo is not None and hi is not None and lo > hi:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="min_speakers must be <= max_speakers",
+        )
 
 
 def _attach_speaker_embeddings(
@@ -47,6 +61,8 @@ def _attach_speaker_embeddings(
         return JSONResponse(content=body)
 
     body["speaker_embeddings"] = result_data["speaker_embeddings"]
+    if result_data.get("speaker_embedding_model"):
+        body["speaker_embedding_model"] = result_data["speaker_embedding_model"]
     return JSONResponse(content=body)
 
 @router.post(
@@ -71,13 +87,25 @@ async def transcribe_audio(
     diarize: Annotated[Optional[bool], Form()] = None,
     vad_mode: Annotated[Optional[str], Form()] = None,
     return_speaker_embeddings: Annotated[Optional[str], Form()] = "false",
+    num_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
+    min_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
+    max_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
+    pipeline: Annotated[Optional[PipelineMode], Form()] = None,
 ):
     """
     OpenAI-compatible transcription endpoint.
+
+    VoxHub extensions: ``diarize``, ``vad_mode``, ``num_speakers`` /
+    ``min_speakers`` / ``max_speakers`` (pyannote hints), ``pipeline``
+    (``legacy`` | ``wordalign``) and ``return_speaker_embeddings``.
+    ``timestamp_granularities[]=word`` adds per-word timestamps and speakers
+    to ``verbose_json`` (wordalign pipeline only).
     """
     request_id = getattr(request.state, "request_id", "unknown")
     service = get_transcription_service(config)
     want_embeddings = (return_speaker_embeddings or "").lower() == "true"
+    include_words = "word" in (timestamp_granularities or [])
+    _validate_speaker_hints(num_speakers, min_speakers, max_speakers)
 
     # 1. Save uploaded file to temp
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as tmp:
@@ -95,11 +123,14 @@ async def transcribe_audio(
             vad_mode=vad_mode,
             request_id=request_id,
             return_speaker_embeddings=want_embeddings,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            pipeline=pipeline.value if pipeline else None,
         )
 
-        # 3. Format result — extract segments list for the formatter
-        segments = final_data["segments"] if isinstance(final_data, dict) else final_data
-        response = format_transcription(segments, response_format)
+        # 3. Format result
+        response = format_transcription(final_data, response_format, include_words=include_words)
 
         # 4. Attach speaker embeddings if requested (JSON formats only)
         if want_embeddings and isinstance(final_data, dict) and "speaker_embeddings" in final_data:
@@ -162,11 +193,16 @@ async def create_transcription_job(
     diarize: Annotated[Optional[bool], Form()] = None,
     vad_mode: Annotated[Optional[str], Form()] = None,
     return_speaker_embeddings: Annotated[Optional[str], Form()] = "false",
+    num_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
+    min_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
+    max_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
+    pipeline: Annotated[Optional[PipelineMode], Form()] = None,
 ):
     request_id = getattr(request.state, "request_id", "unknown")
     job_id = str(uuid.uuid4())
     service = get_transcription_service(config)
     want_embeddings = (return_speaker_embeddings or "").lower() == "true"
+    _validate_speaker_hints(num_speakers, min_speakers, max_speakers)
 
     # 1. Save uploaded file to temp
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as tmp:
@@ -188,6 +224,10 @@ async def create_transcription_job(
         vad_mode=vad_mode,
         request_id=request_id,
         return_speaker_embeddings=want_embeddings,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        pipeline=pipeline.value if pipeline else None,
     )
 
     return {
@@ -302,7 +342,10 @@ async def get_job_result(
     config: Annotated[ServerConfig, Depends(get_config)],
     auth: Annotated[None, ApiKeyDependency] = None,
     response_format: ResponseFormat = ResponseFormat.JSON,
+    words: bool = False,
 ):
+    """Fetch a completed job. ``?words=true`` adds per-word timestamps and
+    speakers to ``verbose_json`` (equivalent of ``timestamp_granularities[]=word``)."""
     service = get_transcription_service(config)
     job = service.get_job(job_id)
     if not job:
@@ -315,10 +358,7 @@ async def get_job_result(
         )
 
     result = job["result"]
-    response = format_transcription(
-        result["segments"] if isinstance(result, dict) else result,
-        response_format,
-    )
+    response = format_transcription(result, response_format, include_words=words)
 
     # Attach speaker embeddings if they were computed for this job
     if isinstance(result, dict) and "speaker_embeddings" in result:

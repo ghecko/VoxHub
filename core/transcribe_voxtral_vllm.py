@@ -194,6 +194,10 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
         # orchestration layer in api/transcriber.py passes context through.
         self.supports_context_carry = True
 
+        # Tells the orchestrator this backend is an HTTP client: several
+        # chunks can be in flight at once and vLLM will batch them.
+        self.is_remote = True
+
         # Lazy-created OpenAI client
         self._client = None
 
@@ -233,12 +237,25 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
             models = self._client.models.list()
             served_ids = [m.id for m in getattr(models, "data", [])]
             if served_ids and self.model_id not in served_ids:
-                logger.warning(
-                    "vLLM server at %s serves %s but this backend is configured "
-                    "for %s — requests will use '%s' as the model parameter and "
-                    "the server may 404 or coerce.",
-                    self.base_url, served_ids, self.model_id, self.model_id,
-                )
+                if len(served_ids) == 1:
+                    # Typical case: the compose service runs a quantised
+                    # variant (e.g. RedHatAI/Voxtral-Mini-3B-2507-FP8-dynamic
+                    # via VOXTRAL_VLLM_MODEL_ID) while models.yaml still names
+                    # the upstream id. vLLM 404s on unknown model names, so
+                    # adopt the one it actually serves instead of failing
+                    # every request.
+                    logger.info(
+                        "vLLM server at %s serves '%s' (configured: '%s'); using the served id",
+                        self.base_url, served_ids[0], self.model_id,
+                    )
+                    self.model_id = served_ids[0]
+                else:
+                    logger.warning(
+                        "vLLM server at %s serves %s but this backend is configured "
+                        "for %s — requests will use '%s' as the model parameter and "
+                        "the server may 404 or coerce.",
+                        self.base_url, served_ids, self.model_id, self.model_id,
+                    )
             else:
                 logger.info(
                     "vLLM backend ready: %s serving %s",
