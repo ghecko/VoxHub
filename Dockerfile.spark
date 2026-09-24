@@ -43,6 +43,22 @@ RUN rm -rf /usr/local/lib/python3.12/dist-packages/transformer_engine \
     echo "✓ transformer_engine successfully removed" || \
     echo "⚠ transformer_engine may still be importable"
 
+# torchvision: the base image ships one built against ITS torch, but uv
+# ignores system site-packages when resolving, so the venv ends up with its
+# own torch (pulled by pyannote/torchaudio). torchmetrics (via lightning,
+# via pyannote) imports torchvision at import time when it is present, and
+# the ABI mismatch surfaces as:
+#     RuntimeError: operator torchvision::nms does not exist
+# VoxHub never uses torchvision, so remove every copy; torchmetrics then
+# skips its image metrics cleanly (_TORCHVISION_AVAILABLE = False).
+RUN uv pip uninstall torchvision 2>/dev/null || true && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/torchvision \
+           /usr/local/lib/python3.12/dist-packages/torchvision*.dist-info \
+           /opt/venv/lib/python3.12/site-packages/torchvision \
+           /opt/venv/lib/python3.12/site-packages/torchvision*.dist-info && \
+    python -c "import torch, torchaudio; print('torch', torch.__version__, torch.__file__); print('torchaudio', torchaudio.__version__)" && \
+    python -c "import pyannote.audio; print('pyannote.audio OK')"
+
 # Copy project files (context is filtered by .dockerignore)
 COPY . .
 
