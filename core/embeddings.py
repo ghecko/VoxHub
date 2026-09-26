@@ -33,8 +33,10 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# Default space, kept for backward compatibility with existing profiles.
-DEFAULT_EMBEDDING_MODEL = "pyannote/embedding"
+# Default space: the diarization pipeline's own embedding model (see
+# PIPELINE_EMBEDDING_ALIAS). pyannote/embedding remains available by id for
+# consumers that still hold profiles from it.
+DEFAULT_EMBEDDING_MODEL = "diarization"
 
 
 def _device() -> torch.device:

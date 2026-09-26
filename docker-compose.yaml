@@ -204,10 +204,11 @@ services:
       - VOXHUB_SPEAKER_MERGE_THRESHOLD=${VOXHUB_SPEAKER_MERGE_THRESHOLD:-0.25}
       # Always emit the cluster distance matrix (needed to calibrate the merge).
       - VOXHUB_SPEAKER_DISTANCES=${VOXHUB_SPEAKER_DISTANCES:-true}
-      # Speaker embedding space (voice profiles, cluster merge). Changing it
-      # invalidates every profile OpenHiNotes stored: compare candidates with
-      # bench/embedding_models.py first (bench/README.md §5).
-      - VOXHUB_EMBEDDING_MODEL=${VOXHUB_EMBEDDING_MODEL:-pyannote/embedding}
+      # Speaker embedding space (voice profiles, cluster merge). 'diarization'
+      # reuses the pipeline's own model (WeSpeaker ResNet34, 256-d). Changing
+      # it invalidates every profile OpenHiNotes stored: compare candidates
+      # with bench/embedding_models.py first (bench/README.md §5).
+      - VOXHUB_EMBEDDING_MODEL=${VOXHUB_EMBEDDING_MODEL:-diarization}
       - VOXHUB_VAD=hybrid
       - VOXHUB_DIARIZE=true
       - VOXHUB_DEVICE=auto

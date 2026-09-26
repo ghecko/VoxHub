@@ -152,12 +152,14 @@ class ServerConfig(BaseSettings):
         "(overlapping turns), the word follows the neighbouring words",
     )
     embedding_model: str = Field(
-        default="pyannote/embedding",
-        description="Speaker embedding model (any id pyannote.audio's PretrainedSpeakerEmbedding wraps: "
-        "pyannote/embedding, pyannote/wespeaker-voxceleb-resnet34-LM, speechbrain/spkrec-ecapa-voxceleb, "
-        "nvidia/speakerverification_en_titanet_large). Reported as speaker_embedding_model {id, dim}; "
-        "changing it invalidates every profile the consumer stored. Compare candidates on your own "
-        "recordings with bench/embedding_models.py first",
+        default="diarization",
+        description="Speaker embedding model: 'diarization' = the model the diarization pipeline clusters "
+        "with (community-1: WeSpeaker ResNet34, 256-d, already loaded), or any id pyannote.audio's "
+        "PretrainedSpeakerEmbedding wraps (pyannote/embedding, pyannote/wespeaker-voxceleb-resnet34-LM, "
+        "speechbrain/spkrec-ecapa-voxceleb, ...). Reported as speaker_embedding_model {id, dim}; changing "
+        "it invalidates every profile the consumer stored. Measured 2026-09-27 on six meetings "
+        "(bench/embedding_models.py): same voice across recordings <= 0.23 vs different voices >= 0.37 "
+        "for 'diarization', against 0.31 vs 0.33 for pyannote/embedding",
     )
     speaker_merge_threshold: float = Field(
         default=0.25,

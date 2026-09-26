@@ -179,7 +179,14 @@ docker compose exec voxhub-api python bench/embedding_models.py --data bench/dat
 `diarization` is the model the diarization pipeline clusters with (in
 pyannote.audio 4 it lives inside the pipeline repo, reported as
 `<pipeline>#embedding`); ECAPA needs `pip install speechbrain` in the
-container. Read the `margin` line: positive means the largest same-voice
+container. Result on 2026-09-27 (six recordings, 17 same-voice pairs, 61 different-voice
+pairs): `pyannote/embedding` same ≤ 0.306 vs different ≥ 0.334 (margin
++0.03, and it had already failed on headset/phone recordings in production);
+`speechbrain/spkrec-ecapa-voxceleb` 0.295 vs 0.373 (+0.08);
+`pyannote/wespeaker-voxceleb-resnet34-LM` and `diarization` (the same
+model inside community-1) 0.227 vs 0.369 (+0.14). `diarization` is now the
+default: same space for clustering, cluster merge and voice profiles, no
+extra model to load. Read the `margin` line: positive means the largest same-voice
 distance is below the smallest different-voice one and the matching
 threshold goes in between. Two same-voice pairs is not a measurement: feed
 it every recording where the same people appear, including headset and
