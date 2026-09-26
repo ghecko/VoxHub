@@ -33,6 +33,11 @@ class DiarizationAnalyzer:
             self.pipeline.to(torch.device("cuda"))
         elif torch.backends.mps.is_available():
             self.pipeline.to(torch.device("mps"))
+        # The pipeline clusters with its own embedding model; knowing which one
+        # matters when choosing VOXHUB_EMBEDDING_MODEL (same space = free
+        # consistency between clustering, merging and voice profiles).
+        logger.info("Diarization pipeline %s (embedding model: %s)",
+                    model_id, getattr(self.pipeline, "embedding", "unknown"))
 
     def diarize(
         self,

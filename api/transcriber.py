@@ -502,18 +502,17 @@ class TranscriptionService:
             if return_speaker_embeddings and diarize and final_data:
                 self._job_progress(job_id, self._PROG_EMBEDDINGS[0], stage="embeddings")
                 try:
-                    from core.embeddings import (
-                        extract_per_speaker_embeddings, EMBEDDING_MODEL_ID, EMBEDDING_DIM,
-                    )
-                    logger.info(f"[{request_id}] Extracting per-speaker embeddings")
+                    from core.embeddings import extract_per_speaker_embeddings, embedding_model_info
+                    logger.info(f"[{request_id}] Extracting per-speaker embeddings ({self.config.embedding_model})")
                     result["speaker_embeddings"] = await asyncio.to_thread(
                         extract_per_speaker_embeddings,
                         audio,
                         final_data,
                         16000,
                         self.config.hf_token,
+                        self.config.embedding_model,
                     )
-                    result["speaker_embedding_model"] = {"id": EMBEDDING_MODEL_ID, "dim": EMBEDDING_DIM}
+                    result["speaker_embedding_model"] = embedding_model_info(self.config.embedding_model)
                 except Exception as e:
                     logger.warning(f"[{request_id}] Speaker embedding extraction failed: {e}")
                     warnings.append(f"speaker embedding extraction failed: {e}")
@@ -549,6 +548,7 @@ class TranscriptionService:
             from core.speaker_merge import merge_speaker_clusters
             out = await asyncio.to_thread(
                 merge_speaker_clusters, audio, turns, threshold, 16000, floor, self.config.hf_token,
+                self.config.embedding_model,
             )
         except Exception as e:
             logger.warning(f"[{request_id}] Speaker cluster merge skipped: {e}")

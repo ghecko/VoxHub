@@ -111,18 +111,26 @@ async def extract_embedding(
 
         # ── Extract embedding ──────────────────────────────────
         logger.info(f"[{request_id}] Extracting speaker embedding ({duration:.1f}s audio)")
+        # The request may name a model but the server owns the embedding space
+        # (a profile is only comparable to vectors from the same model), so an
+        # unexpected id is refused rather than silently served from another space.
+        if model and model != config.embedding_model:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This server embeds with {config.embedding_model!r}, not {model!r}",
+            )
         embedding = await asyncio.to_thread(
             extract_embedding_from_audio,
             audio,
             16000,
             config.hf_token,
+            config.embedding_model,
         )
 
-        model_name = model or "pyannote/embedding"
         return JSONResponse(content={
             "embedding": embedding,
             "embedding_dim": len(embedding),
-            "model": model_name,
+            "model": config.embedding_model,
             "duration": round(duration, 1),
         })
 

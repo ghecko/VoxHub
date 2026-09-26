@@ -151,6 +151,14 @@ class ServerConfig(BaseSettings):
         description="When a second speaker also covers at least this fraction of the word "
         "(overlapping turns), the word follows the neighbouring words",
     )
+    embedding_model: str = Field(
+        default="pyannote/embedding",
+        description="Speaker embedding model (any id pyannote.audio's PretrainedSpeakerEmbedding wraps: "
+        "pyannote/embedding, pyannote/wespeaker-voxceleb-resnet34-LM, speechbrain/spkrec-ecapa-voxceleb, "
+        "nvidia/speakerverification_en_titanet_large). Reported as speaker_embedding_model {id, dim}; "
+        "changing it invalidates every profile the consumer stored. Compare candidates on your own "
+        "recordings with bench/embedding_models.py first",
+    )
     speaker_merge_threshold: float = Field(
         default=0.25,
         description="After diarization, merge speaker clusters whose pyannote/embedding vectors are "

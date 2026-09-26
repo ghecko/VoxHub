@@ -1,83 +1,133 @@
 """
-Speaker embedding extraction using pyannote/embedding.
+Speaker embedding extraction.
 
-This module provides utilities for extracting speaker voice fingerprints
-from audio. Embeddings are 512-dimensional L2-normalized vectors that can
-be used to identify speakers across recordings.
+One embedding backend, chosen by ``VOXHUB_EMBEDDING_MODEL``, behind
+:class:`EmbeddingBackend`. Every model family pyannote.audio can wrap is
+accepted (``pyannote/embedding``, ``pyannote/wespeaker-voxceleb-resnet34-LM``,
+``speechbrain/spkrec-ecapa-voxceleb``, NeMo TitaNet, ...), the vectors are
+L2-normalised so cosine distance is the metric everywhere.
+
+The embedding space is part of the API contract: VoxHub reports the model id
+and dimension next to every embedding it returns (``speaker_embedding_model``),
+and consumers (OpenHiNotes) refuse to compare vectors from another space.
+Changing the model therefore invalidates every stored profile.
+
+Why not stay on ``pyannote/embedding`` (2020, 512-d): measured on HiDock
+meetings it puts the same person recorded on two microphones 0.36-0.58 apart
+and a Microsoft Teams synthetic voice 0.22 from a real speaker, so no
+threshold separates identities across sessions. See bench/embedding_models.py
+to compare candidates on your own recordings before switching.
 
 IMPORTANT: VoxHub never persists embeddings. They are computed on-the-fly
 and returned in API responses. The consuming application is responsible
 for storage and matching.
 """
 
-import os
 import logging
+import os
+import threading
+from typing import Dict, List, Optional
+
 import numpy as np
 import torch
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Singleton model holder — loaded once at first use
-# ---------------------------------------------------------------------------
-
-# Identity of the embedding space. Consumers (OpenHiNotes) persist these
-# vectors as voice profiles; changing the model silently invalidates every
-# enrolled profile, so the id/dim are reported in API responses and must be
-# checked client-side before matching.
-EMBEDDING_MODEL_ID = "pyannote/embedding"
-EMBEDDING_DIM = 512
-
-_embedding_model = None
-_embedding_model_lock = None  # Set at first call (needs event loop context)
+# Default space, kept for backward compatibility with existing profiles.
+DEFAULT_EMBEDDING_MODEL = "pyannote/embedding"
 
 
-def _get_embedding_model(hf_token: Optional[str] = None):
-    """Load the pyannote embedding model (lazy singleton)."""
-    global _embedding_model
-    if _embedding_model is None:
-        from pyannote.audio import Model
+def _device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+class EmbeddingBackend:
+    """A loaded speaker-embedding model with a uniform ``embed`` call."""
+
+    def __init__(self, model_id: str, hf_token: Optional[str] = None, device: Optional[torch.device] = None):
+        from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
 
         token = hf_token or os.getenv("HF_TOKEN")
-        logger.info("Loading speaker embedding model: %s", EMBEDDING_MODEL_ID)
-        _embedding_model = Model.from_pretrained(EMBEDDING_MODEL_ID, token=token)
+        dev = device or _device()
+        logger.info("Loading speaker embedding model: %s on %s", model_id, dev)
+        try:
+            self.model = PretrainedSpeakerEmbedding(model_id, device=dev, token=token)
+        except TypeError:  # pyannote.audio < 3.3 spells it use_auth_token
+            self.model = PretrainedSpeakerEmbedding(model_id, device=dev, use_auth_token=token)
+        self.model_id = model_id
+        self.dim = int(self.model.dimension)
+        self.sample_rate = int(getattr(self.model, "sample_rate", 16000) or 16000)
+        logger.info("Speaker embedding model loaded: %s (dim=%d)", model_id, self.dim)
 
-        # Move to best available device
-        if torch.cuda.is_available():
-            _embedding_model = _embedding_model.to(torch.device("cuda"))
-        elif torch.backends.mps.is_available():
-            _embedding_model = _embedding_model.to(torch.device("mps"))
+    def embed(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
+        """L2-normalised embedding of a mono float32 waveform."""
+        if sample_rate != self.sample_rate:
+            import torchaudio.functional as F  # noqa: N812
+            wav = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))
+            audio = F.resample(wav, sample_rate, self.sample_rate).numpy()
+        waveforms = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).reshape(1, 1, -1)
+        with torch.inference_mode():
+            emb = self.model(waveforms)
+        vec = np.asarray(emb, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(vec))
+        return vec / norm if norm > 0 else vec
 
-        logger.info("Speaker embedding model loaded successfully")
-    return _embedding_model
+    def info(self) -> Dict[str, object]:
+        return {"id": self.model_id, "dim": self.dim}
+
+
+_backend: Optional[EmbeddingBackend] = None
+_backend_lock = threading.Lock()
+
+
+def get_embedding_backend(model_id: Optional[str] = None, hf_token: Optional[str] = None) -> EmbeddingBackend:
+    """Lazy singleton. ``model_id`` defaults to ``VOXHUB_EMBEDDING_MODEL``.
+
+    One model per process: asking for a different id after the first load
+    replaces it (the bench does that; the server never does).
+    """
+    global _backend
+    wanted = model_id or os.getenv("VOXHUB_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
+    with _backend_lock:
+        if _backend is None or _backend.model_id != wanted:
+            _backend = EmbeddingBackend(wanted, hf_token)
+        return _backend
+
+
+def embedding_model_info(model_id: Optional[str] = None) -> Dict[str, object]:
+    """``{"id", "dim"}`` of the active space (loads the model if needed)."""
+    return get_embedding_backend(model_id).info()
 
 
 def extract_embedding_from_audio(
     audio: np.ndarray,
     sample_rate: int = 16000,
     hf_token: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> List[float]:
-    """Extract a single speaker embedding from an audio waveform.
+    """Extract a single speaker embedding from a mono float32 waveform."""
+    return get_embedding_backend(model_id, hf_token).embed(audio, sample_rate).tolist()
 
-    Args:
-        audio: 1-D numpy array of audio samples (mono, float32).
-        sample_rate: Sample rate of the audio (default 16000).
-        hf_token: HuggingFace token for gated model access.
 
-    Returns:
-        List of 512 floats — the L2-normalized speaker embedding.
-    """
-    from pyannote.audio import Inference
-
-    model = _get_embedding_model(hf_token)
-    inference = Inference(model, window="whole")
-
-    waveform = torch.from_numpy(audio.copy()).unsqueeze(0).float()
-    audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-
-    embedding = inference(audio_input)
-    return embedding.tolist()
+def _concat_speaker_audio(
+    audio: np.ndarray, segs: List[Dict], sample_rate: int, max_seconds: Optional[float]
+) -> tuple:
+    """Concatenate a speaker's segments (longest first when capped)."""
+    ordered = sorted(segs, key=lambda x: x["start"] - x["end"]) if max_seconds else segs
+    chunks, total = [], 0.0
+    for seg in ordered:
+        if max_seconds and total >= max_seconds:
+            break
+        a, b = int(seg["start"] * sample_rate), int(seg["end"] * sample_rate)
+        chunk = audio[a:b]
+        if len(chunk):
+            chunks.append(chunk)
+            total += len(chunk) / sample_rate
+    return (np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)), total
 
 
 def extract_per_speaker_embeddings(
@@ -85,81 +135,33 @@ def extract_per_speaker_embeddings(
     segments: List[Dict],
     sample_rate: int = 16000,
     hf_token: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Dict[str, Dict]:
-    """Extract one embedding per speaker from diarized segments.
+    """One embedding per speaker from diarized segments (all of their speech).
 
-    For each speaker, all their speech segments are concatenated into a single
-    waveform and a single embedding is computed from that.
-
-    Args:
-        audio: Full audio waveform (1-D numpy array, mono, float32).
-        segments: List of dicts with 'start', 'end', 'speaker' keys.
-        sample_rate: Sample rate of the audio.
-        hf_token: HuggingFace token for gated model access.
-
-    Returns:
-        Dict mapping speaker labels to embedding info, e.g.:
-        {
-            "SPEAKER_00": {
-                "embedding": [0.023, -0.156, ...],
-                "embedding_dim": 512,
-                "speech_duration": 45.2
-            }
-        }
+    Returns ``{"SPEAKER_00": {"embedding": [...], "embedding_dim": N,
+    "speech_duration": 45.2}, ...}``; speakers with < 1 s of speech are skipped.
     """
-    from pyannote.audio import Inference
-
-    model = _get_embedding_model(hf_token)
-    inference = Inference(model, window="whole")
-
-    # Group segments by speaker
-    speaker_segments: Dict[str, List[Dict]] = {}
+    backend = get_embedding_backend(model_id, hf_token)
+    by_speaker: Dict[str, List[Dict]] = {}
     for seg in segments:
-        speaker = seg.get("speaker")
-        if speaker:
-            speaker_segments.setdefault(speaker, []).append(seg)
+        if seg.get("speaker"):
+            by_speaker.setdefault(seg["speaker"], []).append(seg)
 
     result = {}
-    for speaker, segs in speaker_segments.items():
-        chunks = []
-        total_duration = 0.0
-        for seg in segs:
-            start_sample = int(seg["start"] * sample_rate)
-            end_sample = int(seg["end"] * sample_rate)
-            chunk = audio[start_sample:end_sample]
-            if len(chunk) > 0:
-                chunks.append(chunk)
-                total_duration += seg["end"] - seg["start"]
-
-        if not chunks:
+    for speaker, segs in by_speaker.items():
+        wav, total = _concat_speaker_audio(audio, segs, sample_rate, None)
+        if len(wav) < sample_rate:
+            logger.warning("Skipping embedding for %s: only %.1fs of speech", speaker, total)
             continue
-
-        concatenated = np.concatenate(chunks)
-
-        # Skip speakers with very little speech (< 1 second)
-        if len(concatenated) < sample_rate:
-            logger.warning(
-                f"Skipping embedding for {speaker}: only {total_duration:.1f}s of speech"
-            )
-            continue
-
-        waveform = torch.from_numpy(concatenated.copy()).unsqueeze(0).float()
-        audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-
-        embedding = inference(audio_input)
-
+        vec = backend.embed(wav, sample_rate)
         result[speaker] = {
-            "embedding": embedding.tolist(),
-            "embedding_dim": len(embedding),
-            "speech_duration": round(total_duration, 1),
+            "embedding": vec.tolist(),
+            "embedding_dim": len(vec),
+            "speech_duration": round(total, 1),
         }
-
     return result
 
-
-# ---------------------------------------------------------------------------
-# Cluster merging: undo pyannote over-segmentation of one voice
-# ---------------------------------------------------------------------------
 
 def cluster_embeddings(
     audio: np.ndarray,
@@ -168,43 +170,25 @@ def cluster_embeddings(
     hf_token: Optional[str] = None,
     max_seconds: float = 60.0,
     min_seconds: float = 1.0,
+    model_id: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
-    """One L2-normalised embedding per speaker label in ``turns``.
-
-    Unlike :func:`extract_per_speaker_embeddings` this caps the audio used
-    per speaker at ``max_seconds`` (longest turns first) so a one-hour
-    meeting does not push an hour of waveform through the model, and skips
-    speakers with less than ``min_seconds`` of speech (too short to embed
-    reliably, and not worth merging anyway).
-    """
-    from pyannote.audio import Inference
-
+    """One L2-normalised embedding per speaker label in ``turns``, for the
+    cluster merge: audio capped at ``max_seconds`` per speaker (longest turns
+    first) so a one-hour meeting does not push an hour of waveform through
+    the model; speakers under ``min_seconds`` are skipped."""
     by_speaker: Dict[str, List[Dict]] = {}
     for t in turns:
         if t.get("speaker") and t["end"] > t["start"]:
             by_speaker.setdefault(t["speaker"], []).append(t)
     if not by_speaker:
         return {}
-
-    model = _get_embedding_model(hf_token)
-    inference = Inference(model, window="whole")
+    backend = get_embedding_backend(model_id, hf_token)
     out: Dict[str, np.ndarray] = {}
     for speaker, segs in by_speaker.items():
-        chunks, total = [], 0.0
-        for seg in sorted(segs, key=lambda x: x["start"] - x["end"]):  # longest first
-            if total >= max_seconds:
-                break
-            a, b = int(seg["start"] * sample_rate), int(seg["end"] * sample_rate)
-            chunk = audio[a:b]
-            if len(chunk):
-                chunks.append(chunk)
-                total += len(chunk) / sample_rate
-        if not chunks or total < min_seconds:
+        wav, total = _concat_speaker_audio(audio, segs, sample_rate, max_seconds)
+        if total < min_seconds:
             continue
-        waveform = torch.from_numpy(np.concatenate(chunks).copy()).unsqueeze(0).float()
-        emb = np.asarray(inference({"waveform": waveform, "sample_rate": sample_rate}), dtype=np.float32).ravel()
-        norm = np.linalg.norm(emb)
-        out[speaker] = emb / norm if norm > 0 else emb
+        out[speaker] = backend.embed(wav, sample_rate)
     return out
 
 
@@ -212,28 +196,24 @@ def validate_single_speaker(
     audio: np.ndarray,
     sample_rate: int = 16000,
     hf_token: Optional[str] = None,
-) -> tuple:
+):
     """Check if audio contains a single speaker using diarization.
 
-    Args:
-        audio: 1-D numpy array of audio samples.
-        sample_rate: Sample rate.
-        hf_token: HuggingFace token.
-
-    Returns:
-        Tuple of (is_single_speaker: bool, speaker_count: int).
+    Returns (is_single_speaker, speaker_count). Loads its own copy of the
+    diarization pipeline; used only by the enrolment endpoint.
     """
     from pyannote.audio import Pipeline
 
     token = hf_token or os.getenv("HF_TOKEN")
     pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", token=token
+        os.getenv("VOXHUB_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"), token=token
     )
 
     waveform = torch.from_numpy(audio.copy()).unsqueeze(0).float()
     input_data = {"waveform": waveform, "sample_rate": sample_rate}
 
-    diarization = pipeline(input_data)
+    output = pipeline(input_data)
+    diarization = output.speaker_diarization if hasattr(output, "speaker_diarization") else output
 
     speakers = set()
     for _, _, speaker in diarization.itertracks(yield_label=True):

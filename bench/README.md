@@ -157,3 +157,31 @@ when wiring such a backend into `api/transcriber.py`:
 2. Keep **pyannote/embedding** for voice profiles even if the model diarizes
    by itself, otherwise every enrolled `VoiceProfile` in OpenHiNotes silently
    stops matching (different embedding space).
+
+## 5. Choosing the speaker-embedding model
+
+Voice profiles live or die by one property of the embedding space: the same
+person recorded twice must be closer than two different people, across
+microphones. `pyannote/embedding` (the historical default) fails that on
+HiDock meetings: the same speaker on a table mic and on a headset lands
+0.36-0.58 apart while a Microsoft Teams synthetic voice lands 0.22 from a real
+speaker. `bench/embedding_models.py` measures exactly this on your references
+(the human names in `<stem>.ref.json` must be consistent across files):
+
+```bash
+docker compose exec voxhub-api python bench/embedding_models.py --data bench/data \
+  --model pyannote/embedding \
+  --model pyannote/wespeaker-voxceleb-resnet34-LM \
+  --model speechbrain/spkrec-ecapa-voxceleb \
+  --model diarization --alias MS2=MS --out bench/results/embedding_models.json
+```
+
+`diarization` resolves to the model the diarization pipeline clusters with
+(logged at startup as well); ECAPA needs `pip install speechbrain` in the
+container. Read the `margin` line: positive means the largest same-voice
+distance is below the smallest different-voice one and the matching
+threshold goes in between. Then set `VOXHUB_EMBEDDING_MODEL`, and on the
+OpenHiNotes side update `EXPECTED_EMBEDDING_MODEL` / `EXPECTED_EMBEDDING_DIM`,
+purge the stored profiles and transcription embeddings (admin endpoints) and
+re-enrol: vectors from two models are never comparable.
+

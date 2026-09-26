@@ -81,6 +81,7 @@ def merge_speaker_clusters(
     sample_rate: int = 16000,
     min_speakers: Optional[int] = None,
     hf_token: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Dict:
     """Merge diarization clusters that are the same voice.
 
@@ -102,7 +103,7 @@ def merge_speaker_clusters(
         return {"turns": turns, "merges": [], "distances": {}}
     from core.embeddings import cluster_embeddings  # torch, loaded lazily
 
-    embeddings = cluster_embeddings(audio, turns, sample_rate, hf_token)
+    embeddings = cluster_embeddings(audio, turns, sample_rate, hf_token, model_id=model_id)
     if len(embeddings) < 2:
         return {"turns": turns, "merges": [], "distances": {}}
     distances = pairwise_cosine_distances(embeddings)
