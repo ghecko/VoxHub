@@ -24,9 +24,36 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.error
+
+
+def _sniff_ext(head: bytes) -> str | None:
+    """Guess the audio container from its first bytes (what run_bench accepts)."""
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return ".wav"
+    if head[:4] == b"fLaC":
+        return ".flac"
+    if head[:4] == b"OggS":
+        return ".ogg"
+    if head[4:8] == b"ftyp":
+        return ".m4a"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return ".webm"
+    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0):
+        return ".mp3"
+    return None
+
+
+def _disposition_ext(header: str) -> str | None:
+    """Extension of the filename in a Content-Disposition header, if any."""
+    m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', header)
+    if not m:
+        return None
+    ext = os.path.splitext(m.group(1).strip())[1].lower()
+    return ext or None
 
 
 def _req(base: str, path: str, token: str | None = None, data: dict | None = None):
@@ -99,10 +126,14 @@ def main() -> int:
         return 0
     try:
         with _req(args.base, f"/transcriptions/audio/{args.id}", token) as r:
-            ctype = r.headers.get("Content-Type", "")
-            ext = ".wav" if "wav" in ctype else ".mp3" if "mpeg" in ctype else ".m4a" if "mp4" in ctype else ".audio"
+            # HiDock uploads are stored as .hda and served as octet-stream, so
+            # the Content-Type is useless: sniff the container instead, and
+            # fall back to the original filename's extension.
+            head = r.read(1 << 20)
+            ext = _sniff_ext(head) or _disposition_ext(r.headers.get("Content-Disposition", "")) or ".hda"
             audio_path = os.path.join(args.out, f"{args.stem}{ext}")
             with open(audio_path, "wb") as f:
+                f.write(head)
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:

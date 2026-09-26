@@ -51,13 +51,61 @@ python bench/run_bench.py --data bench/data \
   --pipeline legacy --pipeline wordalign \
   --model voxtral:mini-3b-vllm --model whisper:large-v3
 
-# pass any extra form field to the API (speaker hints, VAD mode...)
-python bench/run_bench.py --data bench/data --extra num_speakers=3
+# speaker-count hint taken from each file's reference (recommended)
+python bench/run_bench.py --data bench/data --speakers-from-ref
+
+# pass any extra form field to the API (VAD mode, a global speaker hint...)
+python bench/run_bench.py --data bench/data --extra vad_mode=none
 ```
 
 Raw `verbose_json` hypotheses land in `bench/results/last/` next to a
 `results.json`; `--rescore bench/results/last` recomputes the table from them
 without touching the GPU (useful after changing a metric or a reference).
+
+Every hypothesis also carries `diarization`, the raw pyannote turns before
+either pipeline touches them. The table scores them as `der_turns` (identical
+for both pipelines by construction), and `bench/reassign.py` re-runs the
+word→speaker rule of `core/align.py` on the saved `words` + `diarization`
+with other thresholds, so the speaker-attribution rule is tuned offline:
+
+```bash
+python bench/reassign.py bench/results/last --out bench/results/last_maxoverlap --continuity-window 0
+python bench/run_bench.py --data bench/data --rescore bench/results/last_maxoverlap --model voxtral:mini-3b-vllm
+```
+
+The same loop calibrates the **speaker cluster merge** (`core/speaker_merge.py`:
+pyannote clusters whose `pyannote/embedding` vectors are closer than
+`VOXHUB_SPEAKER_MERGE_THRESHOLD`, cosine distance, are folded into one). The
+space is tight, so do not guess the threshold: a first try at 0.45 merged every
+recording down to one speaker. Measured on two HiDock meetings forced to
+4 clusters (2026-09-26): clusters of the same voice at 0.10, 0.13, 0.13 (and
+0.28 for a short cluster on a degraded phone call), clean clusters of
+different people at 0.35, 0.39, 0.43, 0.48. Hence the default of **0.25**
+(catches the usual split with 0.1 of margin) and 0.3 as the aggressive
+setting (also fixes the phone case, 0.05 from a different-voice pair).
+Re-check on your own recordings; you need both kinds of pairs in one matrix,
+and the way to get same-voice pairs is to *force* pyannote to over-split with
+an exact `num_speakers` above the true count:
+
+```bash
+# the matrix is emitted whatever the threshold (VOXHUB_SPEAKER_DISTANCES=true);
+# exact over-count hint → pyannote splits real voices
+python bench/run_bench.py --data bench/data --extra num_speakers=4 --out bench/results/split4
+# every hypothesis now carries the 4x4 diarization_distances; sweep offline,
+# --merge-floor 1 so the exact hint does not block the merge during the sweep
+for t in 0.15 0.2 0.25 0.3; do
+  python bench/reassign.py bench/results/split4 --out bench/results/split4_m$t --merge-threshold $t --merge-floor 1
+  python bench/run_bench.py --data bench/data --rescore bench/results/split4_m$t --model voxtral:mini-3b-vllm
+done
+```
+
+Read the matrices: the same-voice pairs must sit clearly below the
+different-voice pairs, the threshold goes in the gap, and a file with the
+true speaker count must come out unmerged at that threshold. Only then set
+`VOXHUB_SPEAKER_MERGE_THRESHOLD` in `.env` (it is read through
+`docker-compose.yaml`; a variable exported in the shell is not passed to the
+container). `num_speakers` / `min_speakers` are a floor the merge never
+crosses, so an exact hint disables it for that file.
 
 ## 3. Reading the table
 
@@ -66,10 +114,25 @@ without touching the GPU (useful after changing a metric or a reference).
   If WER goes *up*, look at `warnings` (aligner fallback) and at the chunk
   logs: a hallucination loop that survived the repetition guard shows up as
   a chunk with a huge word count.
-* **DER** is the same pyannote run in both pipelines; it moves only with
-  `num_speakers` hints or a pyannote version change. A DER gap between the
-  two pipelines means the legacy sanitizer (micro-turn absorption, overlap
-  trimming) is dropping speech.
+* **DER** is scored on the hypothesis *segments*, not on the raw pyannote
+  turns, so it is not identical across pipelines even though both run the
+  same diarization: `wordalign` segments hug the words, `legacy` segments
+  (and a reference corrected from a legacy draft) span whole turns including
+  their pauses. Expect a few points of `der_miss` on `wordalign` from that
+  alone; `--collar 0.5` narrows it. A large `der_conf` moves with
+  `num_speakers` (see `--speakers-from-ref`) or a pyannote version change,
+  and a `der_miss` gap that survives a wide collar means real speech was
+  dropped (legacy sanitizer, or a lost chunk).
+* Pyannote under-counts speakers on short clips (< 1 min) and over-splits
+  when forced above the true count, so pass the hint per file with
+  `--speakers-from-ref` rather than a global `--extra num_speakers=N`.
+* Beware of reference bias: a `.ref.json` corrected from one pipeline's draft
+  inherits its segmentation, its written-French normalisation (`je ne sais
+  pas` vs the spoken `je sais pas`) and its omissions. Speech the draft
+  dropped (overlaps, short interjections) is usually *not* re-added by the
+  corrector, so the other pipeline gets charged insertions for being right.
+  Spot-check the biggest insertions by listening at their word timestamps
+  before trusting a WER gap.
 * **RTF** on vLLM should drop with `wordalign` thanks to concurrent chunks;
   on the in-process transformers backend it is roughly unchanged (the
   aligner adds a little, the shorter segment list removes a little).

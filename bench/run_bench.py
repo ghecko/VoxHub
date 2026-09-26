@@ -114,6 +114,17 @@ def score(hyp: Dict, ref_segments, diar_ref, text_ref, collar: float) -> Dict:
             out["der_conf"] = round(d["confusion"], 4)
         except ValueError as e:
             out["der"] = str(e)
+        # DER on the raw pyannote turns (``diarization`` in verbose_json):
+        # the same number for both pipelines by construction, so a gap
+        # between it and ``der`` measures what the pipeline's segmentation
+        # (legacy sanitizer, wordalign word-tight segments) adds.
+        if hyp.get("diarization"):
+            try:
+                out["der_turns"] = round(der(diar_ref, hyp["diarization"], collar=collar)["der"], 4)
+            except ValueError as e:
+                out["der_turns"] = str(e)
+    if hyp.get("diarization_merges"):
+        out["merges"] = len(hyp["diarization_merges"])
     return out
 
 
@@ -126,6 +137,17 @@ def main() -> int:
     ap.add_argument("--model", action="append", help="Model spec (repeatable; default server default)")
     ap.add_argument("--language", default=None)
     ap.add_argument("--extra", action="append", default=[], help="Extra form field key=value (repeatable)")
+    ap.add_argument(
+        "--speakers-from-ref",
+        action="store_true",
+        help="Send the number of distinct speakers in <stem>.ref.json (or .rttm) as a per-file hint; "
+        "a global --extra num_speakers=N is wrong as soon as recordings differ",
+    )
+    ap.add_argument(
+        "--speakers-hint", choices=("num", "max"), default="num",
+        help="Which hint --speakers-from-ref sends: num_speakers (exact; also a floor that disables the "
+        "cluster merge) or max_speakers (pyannote may find fewer, merge allowed)",
+    )
     ap.add_argument("--collar", type=float, default=0.25, help="DER collar in seconds")
     ap.add_argument("--out", default="bench/results/last", help="Where hypotheses + results.json go")
     ap.add_argument("--rescore", default=None, help="Re-score saved hypotheses from this folder instead of calling the API")
@@ -148,6 +170,11 @@ def main() -> int:
         if not (ref_segments or diar_ref or text_ref):
             print(f"[skip] {os.path.basename(audio)}: no reference (.rttm / .ref.json / .txt)")
             continue
+        per_file_extra = dict(extra)
+        if args.speakers_from_ref and diar_ref:
+            n_ref = len({s["speaker"] for s in diar_ref})
+            if n_ref:
+                per_file_extra["num_speakers" if args.speakers_hint == "num" else "max_speakers"] = str(n_ref)
         for pipeline in pipelines:
             for model in models:
                 tag = f"{os.path.basename(stem)}.{pipeline}.{(model or 'default').replace(':', '_').replace('/', '_')}"
@@ -165,7 +192,7 @@ def main() -> int:
                         "diarize": "true",
                         "pipeline": pipeline,
                         "timestamp_granularities[]": "word",
-                        **extra,
+                        **per_file_extra,
                     }
                     if model:
                         form["model"] = model
@@ -180,7 +207,10 @@ def main() -> int:
                         rows.append({"file": os.path.basename(audio), "pipeline": pipeline, "model": model or "default", "error": str(e)})
                         continue
                     elapsed = round(time.time() - t0, 1)
-                    hyp["_bench"] = {"elapsed_s": elapsed, "audio": os.path.basename(audio), "model": model, "pipeline": pipeline}
+                    hyp["_bench"] = {
+                        "elapsed_s": elapsed, "audio": os.path.basename(audio), "model": model,
+                        "pipeline": pipeline, "form": {k: v for k, v in form.items() if k != "response_format"},
+                    }
                     with open(hyp_path, "w", encoding="utf-8") as f:
                         json.dump(hyp, f, ensure_ascii=False, indent=1)
                     print(f" {elapsed}s")
@@ -197,7 +227,7 @@ def main() -> int:
     with open(os.path.join(args.out, "results.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=1)
 
-    cols = ["file", "pipeline", "model", "wer", "cpwer", "der", "der_miss", "der_fa", "der_conf", "n_speakers", "n_segments", "rtf", "elapsed_s"]
+    cols = ["file", "pipeline", "model", "wer", "cpwer", "der", "der_miss", "der_fa", "der_conf", "der_turns", "merges", "n_speakers", "n_segments", "rtf", "elapsed_s"]
     present = [c for c in cols if any(c in r for r in rows)]
     widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in present}
     print()
