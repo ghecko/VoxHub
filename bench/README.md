@@ -101,7 +101,15 @@ done
 
 Read the matrices: the same-voice pairs must sit clearly below the
 different-voice pairs, the threshold goes in the gap, and a file with the
-true speaker count must come out unmerged at that threshold. Only then set
+true speaker count must come out unmerged at that threshold.
+
+Re-checked on 2026-09-27 in the current embedding space (the diarization
+pipeline's own model), four recordings forced to 4 clusters and swept from
+0.15 to 0.35: every same-voice split merges back by 0.20 (a 27-minute
+two-person meeting goes from cpWER 0.455 to 0.051, a two-person recording
+from 0.780 to 0.200, the degraded Teams call from 0.676 to 0.465) and no
+different-voice pair merges up to 0.35. The 0.25 default sits in the middle
+of that gap. Only then set
 `VOXHUB_SPEAKER_MERGE_THRESHOLD` in `.env` (it is read through
 `docker-compose.yaml`; a variable exported in the shell is not passed to the
 container). `num_speakers` / `min_speakers` are a floor the merge never
