@@ -429,15 +429,35 @@ def assign_word_speakers(
     turns: List[Dict],
     max_gap: float = 1.0,
     default_speaker: str = "SPEAKER_00",
+    min_overlap: float = 0.5,
+    ambiguity: float = 0.5,
+    continuity_window: float = 2.0,
 ) -> List[Dict]:
     """Attach a ``speaker`` to every word from diarization turns.
 
-    For each word the turn with the largest temporal overlap wins (so
-    overlapping turns are resolved per word instead of by trimming audio).
-    A word overlapping no turn takes the nearest turn if it is within
-    ``max_gap`` seconds; otherwise it inherits the previous word's speaker
-    (or the next word's at the very beginning). With no turns at all every
-    word gets ``default_speaker``.
+    For each word the speaker with the largest temporal overlap wins
+    (overlaps are summed over that speaker's turns, so a turn pyannote split
+    in two still counts once). A word is *confident* when its best speaker
+    covers at least ``min_overlap`` of its duration and no other speaker
+    covers ``ambiguity`` or more of it. The two other cases are where the
+    max-overlap rule is a coin flip and cost most speaker errors on real
+    meetings:
+
+    * the word straddles a turn boundary (best overlap below ``min_overlap``):
+      pyannote boundaries jitter by a few hundred ms, and the CTC aligner
+      packs the words of an interjection right up to them;
+    * the word sits inside *overlapping* turns (two speakers each cover
+      ``ambiguity`` of it): Voxtral transcribes one stream, the one that was
+      already speaking.
+
+    Such words take the speaker of the nearest confident word within
+    ``continuity_window`` seconds (previous first, then next), provided that
+    speaker is one of the word's candidates, i.e. overlaps it or is the
+    nearest turn within ``max_gap``. Otherwise they keep the max-overlap
+    speaker. A word overlapping no turn takes the nearest turn if it is
+    within ``max_gap`` seconds; failing that it inherits the previous word's
+    speaker (or the next word's at the very beginning). With no turns at all
+    every word gets ``default_speaker``.
     """
     if not words:
         return []
@@ -452,31 +472,73 @@ def assign_word_speakers(
     starts = [t["start"] for t in turns]
     max_len = max(t["end"] - t["start"] for t in turns)
 
-    out: List[Dict] = []
+    # Pass 1: per-word candidates and a confident label when the overlap is
+    # unambiguous. ``pick`` is the max-overlap (or nearest-turn) fallback.
+    info: List[Dict] = []
     for w in words:
         ws, we = w["start"], w["end"]
+        dur = max(we - ws, 1e-3)
         # Candidate turns: any that starts before the word ends and could
         # still overlap it (start >= ws - max_len).
         lo = bisect.bisect_left(starts, ws - max_len - max_gap)
         hi = bisect.bisect_right(starts, we + max_gap)
-        best, best_ov = None, 0.0
+        overlap: Dict[str, float] = {}
         near, near_d = None, float("inf")
         for t in turns[lo:hi]:
             ov = min(we, t["end"]) - max(ws, t["start"])
-            if ov > best_ov:
-                best, best_ov = t, ov
+            if ov > 0:
+                overlap[t["speaker"]] = overlap.get(t["speaker"], 0.0) + ov
             d = max(t["start"] - we, ws - t["end"], 0.0)
             if d < near_d:
                 near, near_d = t, d
-        if best is not None:
-            spk = best["speaker"]
+        candidates = set(overlap)
+        if near is not None and near_d <= max_gap:
+            candidates.add(near["speaker"])
+        if overlap:
+            ranked = sorted(overlap.items(), key=lambda kv: -kv[1])
+            pick = ranked[0][0]
+            r1 = ranked[0][1] / dur
+            r2 = ranked[1][1] / dur if len(ranked) > 1 else 0.0
+            confident = r1 >= min_overlap and r2 < ambiguity
         elif near is not None and near_d <= max_gap:
-            spk = near["speaker"]
+            pick, confident = near["speaker"], False
         else:
-            spk = None
-        out.append({**w, "speaker": spk})
+            pick, confident = None, False
+        info.append({"pick": pick, "confident": confident, "candidates": candidates})
 
-    # Fill the holes from neighbours.
+    # Pass 2: resolve the ambiguous words by continuity. Left to right, so a
+    # run of ambiguous words (an interjection in an overlap) stays with the
+    # speaker it was attached to, instead of flipping word by word.
+    labels: List[Optional[str]] = [i["pick"] if i["confident"] else None for i in info]
+    resolved: List[bool] = [i["confident"] for i in info]
+    for k, (w, i) in enumerate(zip(words, info)):
+        if i["confident"] or not i["candidates"]:
+            continue
+        chosen = None
+        # Nearest resolved word before, then nearest confident word after,
+        # each within the window; a neighbour whose speaker is not a
+        # candidate ends the search on that side.
+        for j in range(k - 1, -1, -1):
+            if w["start"] - words[j]["end"] > continuity_window:
+                break
+            if resolved[j]:
+                if labels[j] in i["candidates"]:
+                    chosen = labels[j]
+                break
+        if chosen is None:
+            for j in range(k + 1, len(words)):
+                if words[j]["start"] - w["end"] > continuity_window:
+                    break
+                if info[j]["confident"]:
+                    if info[j]["pick"] in i["candidates"]:
+                        chosen = info[j]["pick"]
+                    break
+        labels[k] = chosen if chosen is not None else i["pick"]
+        resolved[k] = True
+
+    out = [{**w, "speaker": spk} for w, spk in zip(words, labels)]
+
+    # Fill the holes (no turn within max_gap) from neighbours.
     last = None
     for w in out:
         if w["speaker"] is None:

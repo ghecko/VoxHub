@@ -157,6 +157,57 @@ def extract_per_speaker_embeddings(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Cluster merging: undo pyannote over-segmentation of one voice
+# ---------------------------------------------------------------------------
+
+def cluster_embeddings(
+    audio: np.ndarray,
+    turns: List[Dict],
+    sample_rate: int = 16000,
+    hf_token: Optional[str] = None,
+    max_seconds: float = 60.0,
+    min_seconds: float = 1.0,
+) -> Dict[str, np.ndarray]:
+    """One L2-normalised embedding per speaker label in ``turns``.
+
+    Unlike :func:`extract_per_speaker_embeddings` this caps the audio used
+    per speaker at ``max_seconds`` (longest turns first) so a one-hour
+    meeting does not push an hour of waveform through the model, and skips
+    speakers with less than ``min_seconds`` of speech (too short to embed
+    reliably, and not worth merging anyway).
+    """
+    from pyannote.audio import Inference
+
+    by_speaker: Dict[str, List[Dict]] = {}
+    for t in turns:
+        if t.get("speaker") and t["end"] > t["start"]:
+            by_speaker.setdefault(t["speaker"], []).append(t)
+    if not by_speaker:
+        return {}
+
+    model = _get_embedding_model(hf_token)
+    inference = Inference(model, window="whole")
+    out: Dict[str, np.ndarray] = {}
+    for speaker, segs in by_speaker.items():
+        chunks, total = [], 0.0
+        for seg in sorted(segs, key=lambda x: x["start"] - x["end"]):  # longest first
+            if total >= max_seconds:
+                break
+            a, b = int(seg["start"] * sample_rate), int(seg["end"] * sample_rate)
+            chunk = audio[a:b]
+            if len(chunk):
+                chunks.append(chunk)
+                total += len(chunk) / sample_rate
+        if not chunks or total < min_seconds:
+            continue
+        waveform = torch.from_numpy(np.concatenate(chunks).copy()).unsqueeze(0).float()
+        emb = np.asarray(inference({"waveform": waveform, "sample_rate": sample_rate}), dtype=np.float32).ravel()
+        norm = np.linalg.norm(emb)
+        out[speaker] = emb / norm if norm > 0 else emb
+    return out
+
+
 def validate_single_speaker(
     audio: np.ndarray,
     sample_rate: int = 16000,

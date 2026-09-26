@@ -29,6 +29,7 @@ def build_chunks(
     max_duration: float = 180.0,
     min_duration: float = 8.0,
     pad: float = 0.25,
+    edge_pad: float = 5.0,
 ) -> List[Dict]:
     """Group speech regions into transcription chunks separated by silences.
 
@@ -42,7 +43,12 @@ def build_chunks(
 
     Every chunk is then padded by ``pad`` seconds into the surrounding
     silence (never into a neighbouring chunk) so CTC alignment has a little
-    leading/trailing context and the first phoneme is never clipped.
+    leading/trailing context and the first phoneme is never clipped. The
+    first chunk is additionally pulled back to 0 (and the last one pushed to
+    ``total_duration``) when it begins (ends) within ``edge_pad`` seconds of
+    the file edge: Silero regularly misses a short first utterance ("Très
+    bien, ..." before the first pause), and a few seconds of extra audio at
+    the edges cost nothing while a dropped first word is unrecoverable.
 
     Returns ``[{"start": float, "end": float, "index": int}, ...]`` sorted by
     start. Returns an empty list when there is no speech.
@@ -116,6 +122,10 @@ def build_chunks(
         c["start"] = round(max(lo, c["start"] - pad, 0.0), 3)
         c["end"] = round(min(hi, c["end"] + pad, total_duration), 3)
         c["index"] = k
+    if chunks and chunks[0]["start"] <= edge_pad:
+        chunks[0]["start"] = 0.0
+    if chunks and total_duration - chunks[-1]["end"] <= edge_pad:
+        chunks[-1]["end"] = round(total_duration, 3)
 
     return chunks
 

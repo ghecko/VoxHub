@@ -198,6 +198,12 @@ services:
       - VOXHUB_MODEL=${VOXHUB_MODEL:-whisper:turbo}
       - VOXHUB_PIPELINE=${VOXHUB_PIPELINE:-wordalign}
       - VOXHUB_PRELOAD_ALIGNER=${VOXHUB_PRELOAD_ALIGNER:-false}
+      # Merge diarization clusters closer than this cosine distance (0 = off).
+      # Calibrated on HiDock meetings (bench/README.md): same voice 0.10-0.13,
+      # different voices 0.35+. 0.25 is the safe default, 0.3 the aggressive one.
+      - VOXHUB_SPEAKER_MERGE_THRESHOLD=${VOXHUB_SPEAKER_MERGE_THRESHOLD:-0.25}
+      # Always emit the cluster distance matrix (needed to calibrate the merge).
+      - VOXHUB_SPEAKER_DISTANCES=${VOXHUB_SPEAKER_DISTANCES:-true}
       - VOXHUB_VAD=hybrid
       - VOXHUB_DIARIZE=true
       - VOXHUB_DEVICE=auto

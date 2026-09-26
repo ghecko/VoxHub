@@ -113,6 +113,11 @@ class ServerConfig(BaseSettings):
     chunk_target_duration: float = Field(default=60.0, description="Preferred chunk length (s)")
     chunk_max_duration: float = Field(default=180.0, description="Hard ceiling on chunk length (s)")
     chunk_min_duration: float = Field(default=8.0, description="Never cut a chunk shorter than this (s)")
+    chunk_edge_pad: float = Field(
+        default=5.0,
+        description="Extend the first/last chunk to the file edges when they start/end within this many "
+        "seconds of them, so speech Silero misses at the very beginning or end is still transcribed",
+    )
     chunk_silero_threshold: float = Field(default=0.4, description="Silero threshold used for chunk boundaries")
 
     # wordalign: how many chunks are sent to the ASR backend concurrently.
@@ -135,6 +140,35 @@ class ServerConfig(BaseSettings):
     word_speaker_max_gap: float = Field(
         default=1.0,
         description="A word with no overlapping speaker turn takes the nearest turn if within this many seconds",
+    )
+    word_speaker_min_overlap: float = Field(
+        default=0.5,
+        description="Below this fraction of the word covered by its best speaker (turn boundary), "
+        "the word follows the neighbouring words instead of the max-overlap rule",
+    )
+    word_speaker_ambiguity: float = Field(
+        default=0.5,
+        description="When a second speaker also covers at least this fraction of the word "
+        "(overlapping turns), the word follows the neighbouring words",
+    )
+    speaker_merge_threshold: float = Field(
+        default=0.25,
+        description="After diarization, merge speaker clusters whose pyannote/embedding vectors are "
+        "closer than this cosine distance (one person split in two by pyannote). 0 disables. "
+        "Calibrated on HiDock meetings (bench/README.md): clusters of one voice sit at 0.10-0.13 "
+        "(0.28 on a degraded phone recording), clean clusters of different people at 0.35-0.48, so "
+        "0.25 catches the usual split with margin; 0.3 also catches the degraded case but sits 0.05 "
+        "from a different-voice pair. num_speakers / min_speakers are a floor the merge never crosses",
+    )
+    speaker_distances: bool = Field(
+        default=True,
+        description="Compute the cluster distance matrix (diarization_distances in verbose_json) even when "
+        "the merge is off: one pyannote/embedding pass per cluster, capped at 60 s each. Needed to "
+        "calibrate speaker_merge_threshold; turn off to save that pass in production",
+    )
+    word_speaker_continuity_window: float = Field(
+        default=2.0,
+        description="How far (s) to look for a confidently labelled neighbour when resolving such words; 0 disables",
     )
 
     # Transcription settings (from main.py)

@@ -15,10 +15,20 @@ def test_empty():
 
 
 def test_single_short_region_is_one_chunk():
-    chunks = build_chunks(_regions([(1.0, 5.0)]), 10.0)
+    chunks = build_chunks(_regions([(1.0, 5.0)]), 10.0, edge_pad=0.0)
     assert len(chunks) == 1
     assert chunks[0]["start"] == 0.75 and chunks[0]["end"] == 5.25
     assert chunks[0]["index"] == 0
+
+
+def test_edge_pad_reaches_file_edges_only_when_close():
+    # First region starts 2 s in, last one ends 3 s before the end: both
+    # chunks are pulled to the file edges (Silero missed a short utterance).
+    chunks = build_chunks(_regions([(2.0, 5.0)]), 8.0, edge_pad=5.0)
+    assert chunks[0]["start"] == 0.0 and chunks[0]["end"] == 8.0
+    # 20 s of leading silence is more than edge_pad: left alone.
+    chunks = build_chunks(_regions([(20.0, 25.0)]), 60.0, edge_pad=5.0)
+    assert chunks[0]["start"] == 19.75 and chunks[0]["end"] == 25.25
 
 
 def test_cuts_at_longest_silence_near_target():

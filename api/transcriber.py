@@ -453,10 +453,11 @@ class TranscriptionService:
                 )
                 pipeline = "legacy"
 
+            diagnostics: Dict[str, Any] = {}
             if pipeline == "wordalign":
                 final_data = await self._run_wordalign(
                     audio, model_spec, lang_hint, prompt, diarize,
-                    request_id, job_id, speaker_hints, warnings,
+                    request_id, job_id, speaker_hints, warnings, diagnostics,
                 )
             else:
                 if diarize and vad_mode == "silero":
@@ -467,7 +468,7 @@ class TranscriptionService:
                     )
                 final_data = await self._run_legacy(
                     audio, model_spec, lang_hint, prompt, vad_mode, diarize,
-                    request_id, job_id, speaker_hints,
+                    request_id, job_id, speaker_hints, diagnostics,
                 )
 
             result: Dict[str, Any] = {
@@ -477,6 +478,25 @@ class TranscriptionService:
                 "pipeline": pipeline,
                 "warnings": warnings,
             }
+            if diagnostics.get("turns"):
+                # Raw diarization turns (pyannote, before any per-pipeline
+                # processing). verbose_json exposes them as ``diarization``.
+                result["diarization"] = [
+                    {
+                        "start": round(float(t["start"]), 3),
+                        "end": round(float(t["end"]), 3),
+                        "speaker": t.get("speaker", "SPEAKER_00"),
+                    }
+                    for t in diagnostics["turns"]
+                    if float(t["end"]) > float(t["start"])
+                ]
+                if diagnostics.get("merges"):
+                    result["diarization_merges"] = diagnostics["merges"]
+                if diagnostics.get("distances"):
+                    result["diarization_distances"] = {
+                        a: {b: round(d, 3) for b, d in row.items()}
+                        for a, row in diagnostics["distances"].items()
+                    }
 
             # ── 5. Speaker embeddings ─────────────────────────────────
             if return_speaker_embeddings and diarize and final_data:
@@ -509,10 +529,45 @@ class TranscriptionService:
     # Pipeline A — legacy (diarize → transcribe each turn)
     # ------------------------------------------------------------------
 
+    async def _merge_clusters(
+        self, audio, turns: List[Dict], speaker_hints: Dict[str, Any],
+        request_id: str, diagnostics: Optional[Dict[str, Any]],
+    ) -> List[Dict]:
+        """Fold pyannote clusters that are the same voice (see core.speaker_merge).
+
+        Runs off the event loop (one pyannote/embedding pass per cluster,
+        capped at 60 s of audio each). Failures never break a transcription:
+        the raw turns are kept and the error is logged.
+        """
+        threshold = self.config.speaker_merge_threshold
+        if len({t.get("speaker") for t in turns}) < 2:
+            return turns
+        if threshold <= 0 and not self.config.speaker_distances:
+            return turns
+        floor = speaker_hints.get("num_speakers") or speaker_hints.get("min_speakers")
+        try:
+            from core.speaker_merge import merge_speaker_clusters
+            out = await asyncio.to_thread(
+                merge_speaker_clusters, audio, turns, threshold, 16000, floor, self.config.hf_token,
+            )
+        except Exception as e:
+            logger.warning(f"[{request_id}] Speaker cluster merge skipped: {e}")
+            return turns
+        if diagnostics is not None:
+            diagnostics["merges"] = out["merges"]
+            diagnostics["distances"] = out["distances"]
+        if out["merges"]:
+            logger.info(
+                f"[{request_id}] Merged speaker clusters: "
+                + ", ".join(f"{m['from']}→{m['into']} (d={m['distance']})" for m in out["merges"])
+            )
+        return out["turns"]
+
     async def _run_legacy(
         self, audio, model_spec: str, language: Optional[str], prompt: Optional[str],
         vad_mode: str, diarize: bool, request_id: str, job_id: Optional[str],
         speaker_hints: Dict[str, Any],
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         # ── 2. VAD / Diarization ──────────────────────────────────────
         self._check_cancelled(job_id, "before VAD")
@@ -521,6 +576,12 @@ class TranscriptionService:
         segments = await self._run_diarization(
             audio, vad_mode, diarize, request_id, job_id, self._PROG_VAD, speaker_hints
         )
+        if diarize and len(segments) > 1:
+            segments = await self._merge_clusters(audio, segments, speaker_hints, request_id, diagnostics)
+        if diagnostics is not None and diarize:
+            # Turns after cluster merging but before the sanitizer trims
+            # overlaps and absorbs micro-turns: what the wordalign pipeline sees.
+            diagnostics["turns"] = [dict(s) for s in segments]
 
         # 2b. Sanitize segments (overlap resolution, micro-turn absorption)
         self._job_progress(job_id, self._PROG_SANITIZE[0])
@@ -643,7 +704,11 @@ class TranscriptionService:
         self, audio, model_spec: str, language: Optional[str], prompt: Optional[str],
         diarize: bool, request_id: str, job_id: Optional[str],
         speaker_hints: Dict[str, Any], warnings: List[str],
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
+        """Run pipeline B. ``diagnostics``, when given, receives the raw pyannote
+        ``turns`` so the caller can expose them (bench DER, offline tuning of
+        the word→speaker rule)."""
         from core.chunking import build_chunks, split_chunk
         from core.align import assign_word_speakers, words_to_segments, uniform_word_times, split_words
 
@@ -671,6 +736,7 @@ class TranscriptionService:
             target_duration=self.config.chunk_target_duration,
             max_duration=self.config.chunk_max_duration,
             min_duration=self.config.chunk_min_duration,
+            edge_pad=self.config.chunk_edge_pad,
         )
         logger.info(
             f"[{request_id}] {len(speech)} speech regions → {len(chunks)} chunks "
@@ -718,10 +784,14 @@ class TranscriptionService:
             return prompt
 
         async def _transcribe_chunk(chunk: Dict, depth: int = 0) -> str:
-            self._check_cancelled(job_id, "during transcription")
             s = int(chunk["start"] * sampling_rate)
             e = int(chunk["end"] * sampling_rate)
             async with sem:
+                # Check INSIDE the semaphore: gather() starts every chunk
+                # coroutine at once, so a check before the slot is acquired
+                # runs for all chunks at t=0 and a later cancel would never
+                # stop the queued ones from hitting vLLM.
+                self._check_cancelled(job_id, "during transcription")
                 text = await asyncio.to_thread(
                     transcriber.transcribe_segment,
                     audio[s:e],
@@ -779,6 +849,7 @@ class TranscriptionService:
                 turns = []
             logger.info(f"[{request_id}] Diarization: {len(turns)} turns, "
                         f"{len({t.get('speaker') for t in turns})} speakers")
+            turns = await self._merge_clusters(audio, turns, speaker_hints, request_id, diagnostics)
         self._job_progress(job_id, self._PROG_WA_DIARIZE[1])
 
         # ── 6. Forced alignment → words ───────────────────────────────
@@ -802,7 +873,15 @@ class TranscriptionService:
         words.sort(key=lambda w: w["start"])
 
         # ── 7. Word → speaker, words → segments ───────────────────────
-        words = assign_word_speakers(words, turns, max_gap=self.config.word_speaker_max_gap)
+        if diagnostics is not None:
+            diagnostics["turns"] = turns
+        words = assign_word_speakers(
+            words, turns,
+            max_gap=self.config.word_speaker_max_gap,
+            min_overlap=self.config.word_speaker_min_overlap,
+            ambiguity=self.config.word_speaker_ambiguity,
+            continuity_window=self.config.word_speaker_continuity_window,
+        )
         segments = words_to_segments(
             words,
             max_pause=self.config.segment_max_pause,

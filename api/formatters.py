@@ -82,6 +82,13 @@ def format_transcription(
             body["words"] = [w for s in segments for w in s.get("words", [])]
         if meta.get("pipeline"):
             body["pipeline"] = meta["pipeline"]
+        if meta.get("diarization"):
+            # VoxHub extension: raw speaker turns, independent of how the
+            # pipeline regrouped words/segments (DER on turns, tuning).
+            body["diarization"] = meta["diarization"]
+            for key in ("diarization_merges", "diarization_distances"):
+                if meta.get(key):
+                    body[key] = meta[key]
         if warnings:
             body["warnings"] = warnings
         return JSONResponse(content=body)

@@ -74,14 +74,54 @@ def test_assign_word_speakers_max_overlap_and_fallbacks():
     ]
     words = [
         _w("hello", 0.5, 1.0),        # A
-        _w("yes", 4.6, 4.9),          # inside both; overlap A=0.3, B=0.3 → tie → first max wins (A)
-        _w("right", 4.7, 5.5),        # overlap A=0.3, B=0.8 → B
+        _w("yes", 4.6, 4.9),          # inside both turns → ambiguous; "hello" is
+                                      # out of the continuity window, the next
+                                      # confident word ("right", B) decides → B
+        _w("right", 4.7, 5.5),        # overlap A=0.3, B=0.8 → confident B
         _w("gap", 10.4, 10.8),        # no overlap, 0.4 s after B → B (nearest within 1 s)
         _w("far", 14.0, 14.5),        # no turn within 1 s → inherits previous (B)
         _w("back", 20.5, 21.0),       # A
     ]
     out = assign_word_speakers(words, turns, max_gap=1.0)
-    assert [w["speaker"] for w in out] == ["A", "A", "B", "B", "B", "A"]
+    assert [w["speaker"] for w in out] == ["A", "B", "B", "B", "B", "A"]
+
+
+def test_assign_word_speakers_boundary_and_overlap_follow_continuity():
+    # A talks 0-10, B interjects 3-4 (overlapping) and then takes over at 10,
+    # but pyannote put the boundary 0.3 s late.
+    turns = [
+        {"start": 0.0, "end": 10.3, "speaker": "A"},
+        {"start": 3.0, "end": 4.0, "speaker": "B"},
+        {"start": 10.0, "end": 15.0, "speaker": "B"},
+    ]
+    words = [
+        _w("a1", 1.0, 1.5),          # confident A
+        _w("x", 3.1, 3.4),           # inside A and B → ambiguous → previous resolved (A)
+        _w("y", 3.5, 3.9),           # ambiguous → previous resolved word "x" (A)
+        _w("a2", 5.0, 5.5),          # confident A
+        _w("b1", 9.9, 10.5),         # A covers 0.4/0.6, B 0.5/0.6 → both ≥ 0.5 → ambiguous;
+                                     # previous resolved is "a2" (A) but 4.4 s away,
+                                     # next confident "b2" (B) → B
+        _w("b2", 11.0, 11.5),        # confident B
+    ]
+    out = assign_word_speakers(words, turns, max_gap=1.0)
+    assert [w["speaker"] for w in out] == ["A", "A", "A", "A", "B", "B"]
+    # Continuity never invents a speaker: with the window at 0 the
+    # max-overlap rule is back (B wins "b1" by 0.1 s, "x"/"y" tie → A first).
+    out = assign_word_speakers(words, turns, max_gap=1.0, continuity_window=0.0)
+    assert [w["speaker"] for w in out] == ["A", "A", "A", "A", "B", "B"]
+
+
+def test_assign_word_speakers_split_turns_are_summed_per_speaker():
+    # A's turn split in two by pyannote around the word; B has one turn
+    # covering it. Per-turn max-overlap would give B; per-speaker gives A.
+    turns = [
+        {"start": 0.0, "end": 1.2, "speaker": "A"},
+        {"start": 1.2, "end": 3.0, "speaker": "A"},
+        {"start": 0.9, "end": 1.5, "speaker": "B"},
+    ]
+    out = assign_word_speakers([_w("w", 1.0, 1.4)], turns, continuity_window=0.0)
+    assert out[0]["speaker"] == "A"
 
 
 def test_assign_word_speakers_leading_hole_takes_next_and_no_turns_default():
