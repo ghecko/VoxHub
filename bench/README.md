@@ -176,11 +176,16 @@ docker compose exec voxhub-api python bench/embedding_models.py --data bench/dat
   --model diarization --alias MS2=MS --out bench/results/embedding_models.json
 ```
 
-`diarization` resolves to the model the diarization pipeline clusters with
-(logged at startup as well); ECAPA needs `pip install speechbrain` in the
+`diarization` is the model the diarization pipeline clusters with (in
+pyannote.audio 4 it lives inside the pipeline repo, reported as
+`<pipeline>#embedding`); ECAPA needs `pip install speechbrain` in the
 container. Read the `margin` line: positive means the largest same-voice
 distance is below the smallest different-voice one and the matching
-threshold goes in between. Then set `VOXHUB_EMBEDDING_MODEL`, and on the
+threshold goes in between. Two same-voice pairs is not a measurement: feed
+it every recording where the same people appear, including headset and
+phone ones. `fetch_openhinotes_ref.py` builds a usable `.ref.json` from any
+OpenHiNotes transcription whose speakers are named, no text correction
+needed for this test (only the speaker segments are used). Then set `VOXHUB_EMBEDDING_MODEL`, and on the
 OpenHiNotes side update `EXPECTED_EMBEDDING_MODEL` / `EXPECTED_EMBEDDING_DIM`,
 purge the stored profiles and transcription embeddings (admin endpoints) and
 re-enrol: vectors from two models are never comparable.

@@ -33,11 +33,20 @@ class DiarizationAnalyzer:
             self.pipeline.to(torch.device("cuda"))
         elif torch.backends.mps.is_available():
             self.pipeline.to(torch.device("mps"))
-        # The pipeline clusters with its own embedding model; knowing which one
-        # matters when choosing VOXHUB_EMBEDDING_MODEL (same space = free
-        # consistency between clustering, merging and voice profiles).
-        logger.info("Diarization pipeline %s (embedding model: %s)",
-                    model_id, getattr(self.pipeline, "embedding", "unknown"))
+        # The pipeline clusters with its own embedding model. Register it so
+        # VOXHUB_EMBEDDING_MODEL=diarization reuses this instance (clustering,
+        # cluster merge and voice profiles then share one space). Never log
+        # `pipeline.embedding` itself: in pyannote.audio 4 it is a dict that
+        # carries the HF token.
+        try:
+            from core.embeddings import set_pipeline_embedding
+            emb = getattr(self.pipeline, "_embedding", None)
+            set_pipeline_embedding(emb, f"{model_id}#embedding")
+            logger.info("Diarization pipeline %s loaded (embedding model: %s, dim=%s)",
+                        model_id, type(emb).__name__ if emb is not None else "none",
+                        getattr(emb, "dimension", "?"))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not register the diarization embedding model: %s", e)
 
     def diarize(
         self,

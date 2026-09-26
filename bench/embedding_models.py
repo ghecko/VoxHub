@@ -56,18 +56,14 @@ def _load_refs(data_dir: str) -> List[Tuple[str, str, List[Dict]]]:
     return out
 
 
-def _resolve_model(model_id: str, hf_token: str | None) -> str:
-    if model_id != "diarization":
-        return model_id
-    from pyannote.audio import Pipeline
+def _load_backend(model_id: str, hf_token: str | None):
+    """EmbeddingBackend for an id, or for the diarization pipeline's own model."""
+    from core.embeddings import EmbeddingBackend, PIPELINE_EMBEDDING_ALIAS, pipeline_embedding_model
 
-    name = os.getenv("VOXHUB_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
-    pipeline = Pipeline.from_pretrained(name, token=hf_token or os.getenv("HF_TOKEN"))
-    emb = getattr(pipeline, "embedding", None)
-    if not isinstance(emb, str):
-        raise SystemExit(f"cannot read the embedding model id from {name} (got {emb!r})")
-    print(f"[diarization] {name} clusters with {emb}")
-    return emb
+    if model_id == PIPELINE_EMBEDDING_ALIAS:
+        model, label = pipeline_embedding_model(hf_token)
+        return EmbeddingBackend(model, hf_token, label=label)
+    return EmbeddingBackend(model_id, hf_token)
 
 
 def main() -> int:
@@ -81,7 +77,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from core.audio import load_audio  # noqa: E402  (VoxHub's loader: mono float32 16 kHz)
-    from core.embeddings import EmbeddingBackend, _concat_speaker_audio  # noqa: E402
+    from core.embeddings import _concat_speaker_audio  # noqa: E402
 
     models = args.model or [
         "pyannote/embedding",
@@ -116,12 +112,13 @@ def main() -> int:
     report = {}
     for model_id in models:
         try:
-            resolved = _resolve_model(model_id, hf_token)
             t0 = time.time()
-            backend = EmbeddingBackend(resolved, hf_token)
+            backend = _load_backend(model_id, hf_token)
             load_s = time.time() - t0
+            resolved = backend.model_id
         except Exception as e:  # noqa: BLE001
-            print(f"== {model_id}: cannot load ({type(e).__name__}: {e})\n")
+            # str(e) only: some loaders put credentials in their repr.
+            print(f"== {model_id}: cannot load ({type(e).__name__}: {str(e)[:200]})\n")
             continue
         t0 = time.time()
         vecs = {k: backend.embed(samples[k]) for k in keys}

@@ -46,22 +46,40 @@ def _device() -> torch.device:
 
 
 class EmbeddingBackend:
-    """A loaded speaker-embedding model with a uniform ``embed`` call."""
+    """A loaded speaker-embedding model with a uniform ``embed`` call.
 
-    def __init__(self, model_id: str, hf_token: Optional[str] = None, device: Optional[torch.device] = None):
-        from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+    ``model`` is either a model id (loaded through pyannote.audio's
+    ``PretrainedSpeakerEmbedding``, or directly through speechbrain for
+    ``speechbrain/...`` ids, whose current API pyannote's wrapper predates) or
+    an already-instantiated pyannote embedding object (the diarization
+    pipeline's own, see :func:`set_pipeline_embedding`).
+    """
 
+    def __init__(self, model, hf_token: Optional[str] = None, device: Optional[torch.device] = None,
+                 label: Optional[str] = None):
         token = hf_token or os.getenv("HF_TOKEN")
         dev = device or _device()
-        logger.info("Loading speaker embedding model: %s on %s", model_id, dev)
-        try:
-            self.model = PretrainedSpeakerEmbedding(model_id, device=dev, token=token)
-        except TypeError:  # pyannote.audio < 3.3 spells it use_auth_token
-            self.model = PretrainedSpeakerEmbedding(model_id, device=dev, use_auth_token=token)
-        self.model_id = model_id
+        if isinstance(model, str):
+            logger.info("Loading speaker embedding model: %s on %s", model, dev)
+            self.model = self._load(model, token, dev)
+            self.model_id = label or model
+        else:
+            self.model = model
+            self.model_id = label or type(model).__name__
         self.dim = int(self.model.dimension)
         self.sample_rate = int(getattr(self.model, "sample_rate", 16000) or 16000)
-        logger.info("Speaker embedding model loaded: %s (dim=%d)", model_id, self.dim)
+        logger.info("Speaker embedding model ready: %s (dim=%d)", self.model_id, self.dim)
+
+    @staticmethod
+    def _load(model_id: str, token: Optional[str], dev: torch.device):
+        if model_id.startswith("speechbrain/"):
+            return _SpeechBrainEmbedding(model_id, token, dev)
+        import inspect
+        from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+
+        params = inspect.signature(PretrainedSpeakerEmbedding).parameters
+        kw = {"token": token} if "token" in params else {"use_auth_token": token}
+        return PretrainedSpeakerEmbedding(model_id, device=dev, **kw)
 
     def embed(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """L2-normalised embedding of a mono float32 waveform."""
@@ -80,12 +98,72 @@ class EmbeddingBackend:
         return {"id": self.model_id, "dim": self.dim}
 
 
+class _SpeechBrainEmbedding:
+    """Minimal stand-in for pyannote's wrapper: speechbrain >= 1.0 dropped the
+    ``use_auth_token`` argument the wrapper still passes."""
+
+    sample_rate = 16000
+
+    def __init__(self, model_id: str, token: Optional[str], dev: torch.device):
+        try:
+            from speechbrain.inference.speaker import EncoderClassifier
+        except ImportError:  # speechbrain < 1.0
+            from speechbrain.pretrained import EncoderClassifier
+        self.classifier = EncoderClassifier.from_hparams(
+            source=model_id, run_opts={"device": str(dev)},
+            savedir=os.path.join(os.getenv("TORCH_HOME", os.path.expanduser("~/.cache")), "speechbrain",
+                                 model_id.replace("/", "--")),
+        )
+        self.device = dev
+        with torch.inference_mode():
+            probe = self.classifier.encode_batch(torch.zeros(1, 16000, device=dev))
+        self.dimension = int(probe.shape[-1])
+
+    def __call__(self, waveforms: torch.Tensor) -> np.ndarray:
+        # waveforms: (batch, channel, samples) → speechbrain wants (batch, samples)
+        wav = waveforms[:, 0, :].to(self.device)
+        with torch.inference_mode():
+            emb = self.classifier.encode_batch(wav)
+        return emb.reshape(wav.shape[0], -1).cpu().numpy()
+
+
+# The diarization pipeline carries its own embedding model (pyannote.audio 4
+# stores it as a subfolder of the pipeline repo, not as a standalone id).
+# core.diarize registers it here so VOXHUB_EMBEDDING_MODEL=diarization reuses
+# the loaded instance instead of loading the pipeline twice.
+PIPELINE_EMBEDDING_ALIAS = "diarization"
+_pipeline_embedding = None
+_pipeline_embedding_label: Optional[str] = None
+
+
+def set_pipeline_embedding(model, label: str) -> None:
+    global _pipeline_embedding, _pipeline_embedding_label
+    if model is not None:
+        _pipeline_embedding, _pipeline_embedding_label = model, label
+
+
+def pipeline_embedding_model(hf_token: Optional[str] = None):
+    """``(model object, label)`` of the diarization pipeline's embedding model,
+    loading the pipeline if core.diarize has not registered one yet."""
+    if _pipeline_embedding is None:
+        from pyannote.audio import Pipeline
+
+        name = os.getenv("VOXHUB_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
+        pipeline = Pipeline.from_pretrained(name, token=hf_token or os.getenv("HF_TOKEN"))
+        emb = getattr(pipeline, "_embedding", None)
+        if emb is None:
+            raise RuntimeError(f"{name} exposes no _embedding model")
+        set_pipeline_embedding(emb, f"{name}#embedding")
+    return _pipeline_embedding, _pipeline_embedding_label
+
+
 _backend: Optional[EmbeddingBackend] = None
 _backend_lock = threading.Lock()
 
 
 def get_embedding_backend(model_id: Optional[str] = None, hf_token: Optional[str] = None) -> EmbeddingBackend:
-    """Lazy singleton. ``model_id`` defaults to ``VOXHUB_EMBEDDING_MODEL``.
+    """Lazy singleton. ``model_id`` defaults to ``VOXHUB_EMBEDDING_MODEL``;
+    ``diarization`` means the diarization pipeline's own embedding model.
 
     One model per process: asking for a different id after the first load
     replaces it (the bench does that; the server never does).
@@ -93,7 +171,11 @@ def get_embedding_backend(model_id: Optional[str] = None, hf_token: Optional[str
     global _backend
     wanted = model_id or os.getenv("VOXHUB_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
     with _backend_lock:
-        if _backend is None or _backend.model_id != wanted:
+        if wanted == PIPELINE_EMBEDDING_ALIAS:
+            model, label = pipeline_embedding_model(hf_token)
+            if _backend is None or _backend.model_id != label:
+                _backend = EmbeddingBackend(model, hf_token, label=label)
+        elif _backend is None or _backend.model_id != wanted:
             _backend = EmbeddingBackend(wanted, hf_token)
         return _backend
 
