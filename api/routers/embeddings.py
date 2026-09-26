@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from api.config import get_config, ServerConfig
 from api.middleware import ApiKeyDependency
 from core.audio import load_audio
-from core.embeddings import extract_embedding_from_audio, validate_single_speaker
+from core.embeddings import embedding_model_info, extract_embedding_from_audio, validate_single_speaker
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -111,13 +111,15 @@ async def extract_embedding(
 
         # ── Extract embedding ──────────────────────────────────
         logger.info(f"[{request_id}] Extracting speaker embedding ({duration:.1f}s audio)")
-        # The request may name a model but the server owns the embedding space
-        # (a profile is only comparable to vectors from the same model), so an
-        # unexpected id is refused rather than silently served from another space.
-        if model and model != config.embedding_model:
+        # The server owns the embedding space (a profile is only comparable to
+        # vectors from the same model). Report the *resolved* id, the same one
+        # transcriptions carry in speaker_embedding_model (the config value may
+        # be the 'diarization' alias), and refuse a request naming another one.
+        space = await asyncio.to_thread(embedding_model_info, config.embedding_model)
+        if model and model not in (config.embedding_model, space["id"]):
             raise HTTPException(
                 status_code=400,
-                detail=f"This server embeds with {config.embedding_model!r}, not {model!r}",
+                detail=f"This server embeds with {space['id']!r}, not {model!r}",
             )
         embedding = await asyncio.to_thread(
             extract_embedding_from_audio,
@@ -130,7 +132,7 @@ async def extract_embedding(
         return JSONResponse(content={
             "embedding": embedding,
             "embedding_dim": len(embedding),
-            "model": config.embedding_model,
+            "model": space["id"],
             "duration": round(duration, 1),
         })
 
