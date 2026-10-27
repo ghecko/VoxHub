@@ -67,6 +67,7 @@ class ServerConfig(BaseSettings):
     max_concurrent: int = 1
 
     # Job result retention (seconds). Completed/failed/cancelled jobs are purged after this delay.
+    idle_free_seconds: int = Field(default=0, description="Free pyannote/aligner/lang-detector and empty the CUDA cache after this many idle seconds (0 = off, env VOXHUB_IDLE_FREE_SECONDS)")
     result_ttl: int = Field(default=3600, description="Seconds to keep finished job results (0 = keep forever)")
 
     # Hybrid VAD tuning (only used when vad=hybrid)
