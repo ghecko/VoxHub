@@ -38,6 +38,7 @@ Transcribe an audio file. OpenAI-compatible — any client that works with the O
 | `model` | string | no | Server default (`whisper:turbo`) | Model specifier. See [Models](#models) below. |
 | `language` | string | no | Auto-detect | ISO 639-1 language code (e.g. `fr`, `en`, `de`). Forces the model to transcribe in the given language instead of auto-detecting. Useful when auto-detect produces translations instead of transcriptions. |
 | `prompt` | string | no | `null` | Optional text to guide the model's style or vocabulary. Works like OpenAI's `prompt` parameter. |
+| `context_bias` | string (repeatable) | no | `null` | Terms to bias recognition towards, one form field per term (Mistral's format). Accepted for forward compatibility: no current backend supports it, so it is ignored and a `context_bias ignored` warning is added to the result. |
 | `response_format` | string | no | `json` | Output format. One of: `json`, `verbose_json`, `text`, `srt`, `vtt`, `vtt_json`. See [Response Formats](#response-formats). |
 | `temperature` | float | no | `0.0` | Sampling temperature (0.0–1.0). Higher values produce more varied output. |
 | `timestamp_granularities[]` | string[] | no | `["segment"]` | Timestamp detail level. Values: `segment`, `word`. With `word`, `verbose_json` carries a `words` array per segment (and a flat top-level `words`). Word timestamps are produced by the `wordalign` pipeline only. |
@@ -194,6 +195,7 @@ Same as `/v1/audio/transcriptions`, except `temperature` and `timestamp_granular
 | `model` | string | no | Server default | Model specifier |
 | `language` | string | no | Auto-detect | ISO 639-1 language code |
 | `prompt` | string | no | `null` | Style/vocabulary hint |
+| `context_bias` | string (repeatable) | no | `null` | Terms to bias recognition towards (see above) |
 | `response_format` | string | no | `json` | Output format for the eventual result |
 | `diarize` | bool | no | Server default | Enable/disable diarization |
 | `vad_mode` | string | no | Server default | VAD strategy (legacy pipeline): `silero`, `pyannote`, `hybrid`, `none` |
@@ -549,4 +551,4 @@ All errors return JSON:
 
 | Status | Meaning |
 |:-------|:--------|
-| `400` | Job not yet 
+| `400` | Job not yet 

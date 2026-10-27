@@ -394,6 +394,7 @@ class TranscriptionService:
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
         pipeline: Optional[str] = None,
+        context_bias: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Transcribe *audio_path* and return a result dict::
 
@@ -436,7 +437,17 @@ class TranscriptionService:
             # ~1 s instead of after language detection, aligner load and
             # chunking (~30-60 s on a cold start).
             self._job_progress(job_id, self._PROG_LOADING[1], stage="loading_model")
-            await self.get_model(model_spec)
+            asr_model = await self.get_model(model_spec)
+            context_bias = [t.strip() for t in (context_bias or []) if t and t.strip()]
+            if context_bias and not getattr(asr_model, "supports_context_bias", False):
+                # Accepted so clients can send it unconditionally; wiring it
+                # into decoding is the job of the first backend that sets
+                # supports_context_bias.
+                logger.info(
+                    f"[{request_id}] context_bias ({len(context_bias)} terms) ignored: "
+                    f"{model_spec} does not support it"
+                )
+                warnings.append(f"context_bias ignored: {model_spec} does not support biasing")
 
             # ── 1b. Language detection ────────────────────────────────
             lang_hint, detected_language = await self._detect_language(
@@ -906,6 +917,7 @@ class TranscriptionService:
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
         pipeline: Optional[str] = None,
+        context_bias: Optional[List[str]] = None,
     ):
         try:
             # If cancelled while still pending, skip entirely
@@ -927,6 +939,7 @@ class TranscriptionService:
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
                 pipeline=pipeline,
+                context_bias=context_bias,
             )
         except CancelledError:
             logger.info(f"[{request_id}] Job {job_id} cancelled")
