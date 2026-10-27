@@ -91,6 +91,7 @@ async def transcribe_audio(
     min_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
     max_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
     pipeline: Annotated[Optional[PipelineMode], Form()] = None,
+    context_bias: Annotated[Optional[List[str]], Form()] = None,
 ):
     """
     OpenAI-compatible transcription endpoint.
@@ -99,7 +100,9 @@ async def transcribe_audio(
     ``min_speakers`` / ``max_speakers`` (pyannote hints), ``pipeline``
     (``legacy`` | ``wordalign``) and ``return_speaker_embeddings``.
     ``timestamp_granularities[]=word`` adds per-word timestamps and speakers
-    to ``verbose_json`` (wordalign pipeline only).
+    to ``verbose_json`` (wordalign pipeline only). ``context_bias`` (one form
+    field per term, as in Mistral's API) is accepted for backends that
+    support biasing; with any other backend it is ignored with a warning.
     """
     request_id = getattr(request.state, "request_id", "unknown")
     service = get_transcription_service(config)
@@ -127,6 +130,7 @@ async def transcribe_audio(
             min_speakers=min_speakers,
             max_speakers=max_speakers,
             pipeline=pipeline.value if pipeline else None,
+            context_bias=context_bias,
         )
 
         # 3. Format result
@@ -197,6 +201,7 @@ async def create_transcription_job(
     min_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
     max_speakers: Annotated[Optional[int], Form(ge=1, le=50)] = None,
     pipeline: Annotated[Optional[PipelineMode], Form()] = None,
+    context_bias: Annotated[Optional[List[str]], Form()] = None,
 ):
     request_id = getattr(request.state, "request_id", "unknown")
     job_id = str(uuid.uuid4())
@@ -228,6 +233,7 @@ async def create_transcription_job(
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         pipeline=pipeline.value if pipeline else None,
+        context_bias=context_bias,
     )
 
     return {
