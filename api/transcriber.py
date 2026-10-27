@@ -99,6 +99,59 @@ class TranscriptionService:
                 return True
             return False
 
+    def is_busy(self) -> bool:
+        """True while a transcription runs (sync request or background job)."""
+        if self._semaphore._value < self.config.max_concurrent:
+            return True
+        return any(j["status"] in ("pending", "processing") for j in self._jobs.values())
+
+    async def free_resources(self, unload_models: bool = False) -> Dict[str, Any]:
+        """Release the auxiliary models (pyannote VAD/diarization, forced aligner,
+        language detector, boundary refiner, speaker-embedding model) and empty the
+        CUDA cache. They reload lazily on the next request. With ``unload_models``
+        the loaded transcribers are dropped too.
+
+        Raises RuntimeError if a transcription is running.
+        """
+        import gc
+        async with self._lock:
+            if self.is_busy():
+                raise RuntimeError("a transcription is running")
+            freed = []
+            if self._vad_engines:
+                freed.append("vad/pyannote")
+            self._vad_engines.clear()
+            for attr, name in (("_boundary_refiner", "boundary_refiner"),
+                               ("_lang_detector", "lang_detector"),
+                               ("_aligner", "aligner"),
+                               ("_chunk_vad", "chunk_vad")):
+                if getattr(self, attr) is not None:
+                    freed.append(name)
+                setattr(self, attr, None)
+            self._aligner_failed = False
+            if unload_models and self._models:
+                freed.extend(f"model:{m}" for m in self._models)
+                self._models.clear()
+            try:
+                from core import embeddings
+                if embeddings._backend is not None or embeddings._pipeline_embedding is not None:
+                    freed.append("speaker_embedding")
+                embeddings._backend = None
+                embeddings._pipeline_embedding = None
+                embeddings._pipeline_embedding_label = None
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not release embedding model: %s", e)
+            before = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            after = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+            logger.info("Freed resources: %s (CUDA reserved %.2f -> %.2f GiB)",
+                        freed, before / 2**30, after / 2**30)
+            return {"freed": freed,
+                    "cuda_reserved_gib_before": round(before / 2**30, 2),
+                    "cuda_reserved_gib_after": round(after / 2**30, 2)}
+
     def list_loaded_models(self) -> List[str]:
         return list(self._models.keys())
 
@@ -116,6 +169,27 @@ class TranscriptionService:
         while True:
             await asyncio.sleep(60)  # check every minute
             self._purge_expired_jobs()
+            await self._idle_free_check()
+
+    async def _idle_free_check(self):
+        """Free auxiliary models after VOXHUB_IDLE_FREE_SECONDS without activity (0 = off)."""
+        idle = getattr(self.config, "idle_free_seconds", 0)
+        if idle <= 0:
+            return
+        if self.is_busy():
+            self._last_activity = time.time()
+            return
+        last = getattr(self, "_last_activity", None)
+        if last is None:
+            self._last_activity = time.time()
+            return
+        has_aux = bool(self._vad_engines or self._aligner or self._lang_detector or self._boundary_refiner)
+        if has_aux and time.time() - last >= idle:
+            try:
+                await self.free_resources()
+            except RuntimeError:
+                pass
+            self._last_activity = time.time()
 
     def _purge_expired_jobs(self):
         ttl = self.config.result_ttl

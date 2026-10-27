@@ -456,6 +456,24 @@ Returns `404` if the model is not currently loaded.
 
 ---
 
+### `POST /models/free`
+
+Release the auxiliary models (pyannote VAD/diarization, forced aligner, language detector, boundary refiner, speaker-embedding model) and empty the CUDA cache. They reload lazily on the next request. Useful on unified-memory machines (DGX Spark) before loading a large LLM.
+
+**Content-Type:** `multipart/form-data`
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `unload_models` | bool | no (default `false`) | Also unload the loaded transcribers |
+
+```json
+{ "status": "success", "freed": ["vad/pyannote", "aligner"], "cuda_reserved_gib_before": 18.4, "cuda_reserved_gib_after": 0.3 }
+```
+
+Returns `409` while a transcription is running. `VOXHUB_IDLE_FREE_SECONDS` (default `0` = off) triggers the same release automatically after that many idle seconds.
+
+---
+
 ### `GET /health`
 
 Health check. Also available at `GET /v1/health`.
