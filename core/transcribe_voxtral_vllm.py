@@ -65,9 +65,11 @@ _TOKENS_PER_SECOND_BUDGET = float(
 )
 _MIN_MAX_TOKENS = int(os.environ.get("VOXTRAL_VLLM_MIN_MAX_TOKENS", "64"))
 
-# Per-segment HTTP timeout. vLLM 0.19.x silently drops max_tokens on the
-# /v1/audio/transcriptions endpoint, so the only reliable way to abort a
-# stuck/looping segment is at the HTTP layer. We compute a duration-aware
+# Per-segment HTTP timeout. vLLM silently ignores ``max_tokens`` on the
+# /v1/audio/transcriptions endpoint (its TranscriptionRequest names the
+# field ``max_completion_tokens``, which we now send as well), so on builds
+# that honour neither, the only reliable way to abort a stuck/looping
+# segment is at the HTTP layer. We compute a duration-aware
 # ceiling: max(MIN, duration_s * MULT). For a 15s segment with MULT=3 the
 # ceiling is 45s, well above the few seconds a clean segment actually
 # needs but well below the ~120s a stuck one would otherwise burn. On
@@ -301,8 +303,12 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
         # degenerate (concatenated-SSE) shapes defensively.
         # Per-segment max-tokens cap. The OpenAI SDK's
         # ``audio.transcriptions.create`` does not expose ``max_tokens`` in
-        # its typed kwargs, so we tunnel it through ``extra_body`` — vLLM's
-        # OpenAI-compatible handler accepts it for transcription requests.
+        # its typed kwargs, so we tunnel it through ``extra_body``. vLLM's
+        # TranscriptionRequest calls the field ``max_completion_tokens`` and
+        # ignores an unknown ``max_tokens`` (it only logs "fields ... ignored"),
+        # so both spellings are sent: without an effective cap a looping
+        # segment generates up to --max-model-len and is only stopped by the
+        # HTTP timeout below (3x the audio duration).
         # See module-level _TOKENS_PER_SECOND_BUDGET for the rationale.
         duration_s = len(audio) / self.sample_rate
         max_tokens = max(
@@ -335,6 +341,7 @@ class VoxtralVLLMTranscriber(BaseTranscriber):
             "response_format": "json",
             "extra_body": {
                 "max_tokens": max_tokens,
+                "max_completion_tokens": max_tokens,
                 "temperature": _temperature,
                 "repetition_penalty": _repetition_penalty,
             },

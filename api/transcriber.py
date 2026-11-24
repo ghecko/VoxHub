@@ -811,7 +811,12 @@ class TranscriptionService:
                         f"[{chunk['start']:.1f}-{chunk['end']:.1f}s]; retrying on two halves"
                     )
                     total[0] += 1
-                    parts = [await _transcribe_chunk(h, depth + 1) for h in halves]
+                    # Both halves at once (the semaphore still bounds the
+                    # load on vLLM): a chunk that timed out has already cost
+                    # minutes, no reason to pay for the halves one by one.
+                    parts = await asyncio.gather(
+                        *(_transcribe_chunk(h, depth + 1) for h in halves)
+                    )
                     text = " ".join(p for p in parts if p).strip()
                     return text
             done_count[0] += 1
@@ -827,7 +832,17 @@ class TranscriptionService:
         async def _run(chunk: Dict):
             texts[chunk["index"]] = await _transcribe_chunk(chunk)
 
-        await asyncio.gather(*(_run(c) for c in chunks))
+        # A chunk reports progress only when it completes, and a single
+        # request can run for minutes: the vLLM timeout is 3x the chunk
+        # duration (9 min for a 180 s chunk) and a hallucination loop on
+        # trailing noise/silence uses all of it. Without a heartbeat the
+        # poller sees a frozen job on the last chunk(s) and kills it as stale
+        # (300 s in OpenHiNotes). bump=0: touch updated_at only, the progress
+        # bar keeps following completed chunks.
+        await self._await_with_heartbeat(
+            asyncio.ensure_future(asyncio.gather(*(_run(c) for c in chunks))),
+            job_id, stage="transcribing", ceiling=self._PROG_WA_TRANSCRIBE[1], bump=0.0,
+        )
 
         # ── 5. Wait for diarization ───────────────────────────────────
         turns: List[Dict] = []
@@ -865,7 +880,12 @@ class TranscriptionService:
             s = int(chunk["start"] * sampling_rate)
             e = int(chunk["end"] * sampling_rate)
             if aligner is not None:
-                chunk_words = await asyncio.to_thread(aligner.align, audio[s:e], text, chunk["start"])
+                chunk_words = await self._await_with_heartbeat(
+                    asyncio.ensure_future(
+                        asyncio.to_thread(aligner.align, audio[s:e], text, chunk["start"])
+                    ),
+                    job_id, stage="aligning", ceiling=self._PROG_WA_ALIGN[1], bump=0.0,
+                )
             else:
                 chunk_words = uniform_word_times(split_words(text), chunk["start"], chunk["end"])
             words.extend(chunk_words)
