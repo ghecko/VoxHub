@@ -209,6 +209,8 @@ services:
       # it invalidates every profile OpenHiNotes stored: compare candidates
       # with bench/embedding_models.py first (bench/README.md §5).
       - VOXHUB_EMBEDDING_MODEL=${VOXHUB_EMBEDDING_MODEL:-diarization}
+      # Free pyannote/aligner/lang-detector + CUDA cache after N idle seconds (0 = off)
+      - VOXHUB_IDLE_FREE_SECONDS=${VOXHUB_IDLE_FREE_SECONDS:-600}
       - VOXHUB_VAD=hybrid
       - VOXHUB_DIARIZE=true
       - VOXHUB_DEVICE=auto

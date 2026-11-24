@@ -13,6 +13,11 @@ class BaseTranscriber(ABC):
         self.device = device
         self.language = language
         self.supports_context_carry = False
+        # True for backends that can bias decoding towards a list of terms
+        # (Mistral's `context_bias`). None of the current ones can: the open
+        # Voxtral-Mini-3B-2507 has no such input, and vLLM forwards only the
+        # audio and language to Voxtral.
+        self.supports_context_bias = False
         # True for HTTP-client backends (vLLM): chunks may be transcribed concurrently.
         self.is_remote = False
 

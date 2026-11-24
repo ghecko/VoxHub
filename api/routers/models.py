@@ -63,3 +63,22 @@ async def unload_model_endpoint(
         return JSONResponse(content={"status": "success", "model": model})
     else:
         return JSONResponse(content={"status": "error", "message": f"Model {model} not found or not loaded"}, status_code=404)
+
+
+@router.post("/models/free", tags=["Models"])
+async def free_resources_endpoint(
+    config: Annotated[ServerConfig, Depends(get_config)],
+    unload_models: Annotated[bool, Form()] = False,
+):
+    """
+    Release pyannote (VAD/diarization), the forced aligner, the language detector,
+    the boundary refiner and the speaker-embedding model, then empty the CUDA cache.
+    They reload lazily on the next request. Set unload_models=true to also drop the
+    loaded transcribers. Returns 409 while a transcription is running.
+    """
+    service = get_transcription_service(config)
+    try:
+        info = await service.free_resources(unload_models=unload_models)
+    except RuntimeError as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=409)
+    return JSONResponse(content={"status": "success", **info})

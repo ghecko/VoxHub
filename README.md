@@ -377,6 +377,7 @@ python test_jobs.py audio/your_audio_file.mp3
 - `GET /models/list` — List currently loaded models (in VRAM)
 - `POST /models/load` — Pre-load a model
 - `POST /models/unload` — Free VRAM
+- `POST /models/free` — Release pyannote, aligner, language detector, boundary refiner and embedding model, then empty the CUDA cache (`unload_models=true` also drops the transcribers; 409 while a job runs). Set `VOXHUB_IDLE_FREE_SECONDS=N` to do it automatically after N idle seconds.
 
 ---
 
